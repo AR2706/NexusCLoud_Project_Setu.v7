@@ -1,0 +1,299 @@
+const express = require('express');
+const axios = require('axios');
+const chalk = require('chalk');
+const os = require('os');
+const { spawn, exec } = require('child_process');
+
+// ==========================================
+// 🛡️ HIGH AVAILABILITY (HA) FAILOVER MODULE
+// ==========================================
+class HighAvailabilityWatcher {
+    constructor(primaryIp, staticNgrokDomain, targetPort) {
+        this.primaryIp = primaryIp;
+        this.staticNgrokDomain = staticNgrokDomain;
+        this.targetPort = targetPort;
+        
+        this.failCount = 0;
+        this.maxFails = 3;         // 3 missed pings = Node Death
+        this.checkInterval = 5000; // Ping every 5 seconds
+        this.hasTakenOver = false;
+    }
+
+    start() {
+        console.log(chalk.cyan(`\n[HA-WATCHER] 🛡️ Active-Passive Failover Armed.`));
+        console.log(chalk.gray(`[HA-WATCHER] Monitoring Primary Node at ${this.primaryIp}...`));
+        
+        setInterval(() => this.pingPrimary(), this.checkInterval);
+    }
+
+    async pingPrimary() {
+        if (this.hasTakenOver) return; 
+
+        try {
+            // Ping the GUI status endpoint on the primary machine
+            await axios.get(`http://${this.primaryIp}:9000/api/status`, { timeout: 3000 });
+            this.failCount = 0; 
+        } catch (error) {
+            this.failCount++;
+            console.log(chalk.yellow(`[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`));
+
+            if (this.failCount >= this.maxFails) {
+                this.triggerFailover();
+            }
+        }
+    }
+
+    triggerFailover() {
+        this.hasTakenOver = true;
+        console.log(chalk.bgRed.white.bold(`\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`));
+
+        // Hijack the static Ngrok URL
+        const ngrokCommand = `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`;
+
+        exec(ngrokCommand, (error) => {
+            if (error) {
+                console.error(chalk.red(`[HA-WATCHER] Failed to hijack Ngrok tunnel: ${error.message}`));
+                this.hasTakenOver = false; 
+            }
+        });
+        
+        console.log(chalk.green(`[HA-WATCHER] ✅ Secondary Node successfully took control of ${this.staticNgrokDomain}!`));
+    }
+}
+
+// ==========================================
+// 🚀 CORE EXPRESS ENGINE
+// ==========================================
+const app = express();
+app.use(express.json());
+
+let authToken = null;
+let activeRegion = null;
+
+// Point this to your Render URL (e.g., "https://nexus-brain.onrender.com") when deploying to production
+let controlPlaneUrl = "http://localhost:8080"; 
+
+// --- API ROUTES FOR THE DESKTOP UI ---
+
+app.post('/api/register', async (req, res) => {
+    try {
+        const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/register`, {
+            email: req.body.email,
+            password: req.body.password,
+            region: req.body.region
+        });
+        
+        if (response.data.success) {
+            authToken = response.data.token;
+            activeRegion = req.body.region || 'global';
+            
+            console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
+            spawn('node', ['index.js', authToken, activeRegion], { stdio: 'inherit' });
+            res.json({ success: true, region: activeRegion });
+        } else {
+            res.status(400).json({ success: false, error: response.data.error });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, error: "Control Plane unreachable." });
+    }
+});
+
+app.post('/api/login', async (req, res) => {
+    try {
+        const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/provider`, {
+            email: req.body.email,
+            password: req.body.password,
+            region: req.body.region
+        });
+        
+        if (response.data.success) {
+            authToken = response.data.token;
+            activeRegion = req.body.region || 'global';
+            
+            console.log(chalk.green(`\n🔐 Authentication Successful! Token acquired.`));
+            spawn('node', ['index.js', authToken, activeRegion], { stdio: 'inherit' });
+            res.json({ success: true, region: activeRegion });
+        } else {
+            res.status(401).json({ success: false, error: response.data.error });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, error: "Control Plane unreachable." });
+    }
+});
+
+// Telemetry/Status Route (Also used by HA-Watcher to check if node is alive)
+app.get('/api/status', (req, res) => {
+    res.json({
+        authenticated: authToken !== null,
+        region: activeRegion,
+        cores: os.cpus().length,
+        ram: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
+        status: "alive"
+    });
+});
+
+// --- THE DESKTOP FRONTEND (Served from Memory) ---
+app.get('/', (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Nexus Provider Engine</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-gray-900 text-white h-screen flex items-center justify-center font-sans">
+        
+        <div id="login-view" class="bg-gray-800 p-8 rounded-xl shadow-2xl w-96 border border-gray-700">
+            <h1 id="form-title" class="text-2xl font-bold mb-2 flex items-center"><span class="text-blue-500 mr-2">⚡</span> Nexus Desktop</h1>
+            <p id="form-subtitle" class="text-gray-400 text-sm mb-6">Authenticate your Edge Node</p>
+            
+            <input type="email" id="email" placeholder="Email" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-4 text-white outline-none focus:border-blue-500">
+            <input type="password" id="password" placeholder="Password" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-4 text-white outline-none focus:border-blue-500">
+            
+            <select id="region" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-6 text-white outline-none focus:border-blue-500 appearance-none">
+                <option value="in-mum">📍 Asia South (Mumbai)</option>
+                <option value="us-east">📍 US East (N. Virginia)</option>
+                <option value="eu-west">📍 Europe West (Frankfurt)</option>
+                <option value="global">🌐 Global Edge Anycast</option>
+            </select>
+            
+            <button id="submit-btn" onclick="authenticate('login')" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition-colors mb-4">
+                Connect to Grid
+            </button>
+
+            <div class="text-center text-sm">
+                <span id="toggle-text" class="text-gray-400">Don't have an account?</span>
+                <button onclick="toggleMode()" id="toggle-btn" class="text-blue-400 font-bold hover:underline ml-1">Register</button>
+            </div>
+
+            <p id="error-msg" class="text-red-400 text-sm mt-4 text-center hidden"></p>
+        </div>
+
+        <div id="dashboard-view" class="hidden bg-gray-800 p-8 rounded-xl shadow-2xl w-[650px] border border-gray-700">
+            <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                <h1 class="text-2xl font-bold text-white flex items-center"><span class="text-green-500 mr-2">●</span> Engine Active</h1>
+                <span class="bg-blue-900 text-blue-300 text-xs px-3 py-1 rounded-full border border-blue-700">Authenticated</span>
+            </div>
+            
+            <div class="grid grid-cols-3 gap-4 mb-6">
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-gray-400 text-xs uppercase tracking-wider mb-1">Territory</p>
+                    <p class="text-xl font-mono text-blue-400" id="stat-region">--</p>
+                </div>
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-gray-400 text-xs uppercase tracking-wider mb-1">Compute Cores</p>
+                    <p class="text-xl font-mono" id="stat-cores">--</p>
+                </div>
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-gray-400 text-xs uppercase tracking-wider mb-1">System Memory</p>
+                    <p class="text-xl font-mono" id="stat-ram">-- GB</p>
+                </div>
+            </div>
+
+            <div class="bg-black p-4 rounded border border-gray-700 font-mono text-sm text-green-400 h-32 overflow-y-auto">
+                > Initializing secure connection...<br>
+                > Synchronizing regional ledger...<br>
+                > Awaiting central brain instructions...<br>
+            </div>
+        </div>
+
+        <script>
+            let currentMode = 'login';
+
+            function toggleMode() {
+                currentMode = currentMode === 'login' ? 'register' : 'login';
+                document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate your Edge Node' : 'Register your Edge Node';
+                document.getElementById('submit-btn').textContent = currentMode === 'login' ? 'Connect to Grid' : 'Create Account';
+                document.getElementById('submit-btn').setAttribute('onclick', \`authenticate('\${currentMode}')\`);
+                document.getElementById('toggle-text').textContent = currentMode === 'login' ? "Don't have an account?" : "Already registered?";
+                document.getElementById('toggle-btn').textContent = currentMode === 'login' ? "Register" : "Log In";
+                document.getElementById('error-msg').classList.add('hidden');
+            }
+
+            async function authenticate(mode) {
+                const email = document.getElementById('email').value;
+                const password = document.getElementById('password').value;
+                const region = document.getElementById('region').value;
+                const errorMsg = document.getElementById('error-msg');
+                const btn = document.getElementById('submit-btn');
+                
+                btn.disabled = true;
+                btn.textContent = 'Processing...';
+
+                try {
+                    const endpoint = mode === 'register' ? '/api/register' : '/api/login';
+                    const res = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password, region })
+                    });
+                    
+                    const data = await res.json();
+                    if (data.success) {
+                        document.getElementById('login-view').classList.add('hidden');
+                        document.getElementById('dashboard-view').classList.remove('hidden');
+                        loadStats();
+                    } else {
+                        errorMsg.textContent = data.error;
+                        errorMsg.classList.remove('hidden');
+                    }
+                } catch(e) {
+                    errorMsg.textContent = "Network Error.";
+                    errorMsg.classList.remove('hidden');
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = mode === 'login' ? 'Connect to Grid' : 'Create Account';
+                }
+            }
+
+            async function loadStats() {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                document.getElementById('stat-cores').textContent = data.cores;
+                document.getElementById('stat-ram').textContent = data.ram + " GB";
+                document.getElementById('stat-region').textContent = data.region.toUpperCase();
+            }
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+// ==========================================
+// 🪟 NATIVE APP LAUNCHER & INITIALIZATION
+// ==========================================
+const GUI_PORT = 9000;
+
+app.listen(GUI_PORT, () => {
+    console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
+    
+    // Check if user passed HA command line arguments
+    const args = process.argv.slice(2);
+    if (args[0] === '--backup' && args[1] && args[2]) {
+        const primaryIp = args[1];
+        const ngrokDomain = args[2];
+        const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
+        watcher.start();
+    } else {
+        console.log(chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`));
+    }
+
+    const url = `http://localhost:${GUI_PORT}`;
+    console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
+
+    let command;
+    if (process.platform === 'win32') {
+        command = `start chrome --app=${url} || start msedge --app=${url}`;
+    } else if (process.platform === 'darwin') {
+        command = `open -n -a "Google Chrome" --args --app=${url}`;
+    } else {
+        command = `google-chrome --app=${url} || chromium-browser --app=${url} || firefox -new-window ${url} || xdg-open ${url}`;
+    }
+
+    exec(command, (err) => {
+        if (err) {
+            console.log(chalk.yellow(`   └─ ⚠️ Auto-launch failed. Please open ${url} in your browser.`));
+        }
+    });
+});
