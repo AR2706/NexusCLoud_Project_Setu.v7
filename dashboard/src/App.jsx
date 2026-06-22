@@ -153,7 +153,8 @@ function LoginPage({ onLogin }) {
     const endpoint = isRegistering ? '/api/v1/auth/register' : '/api/v1/auth/provider';
 
     try {
-      const response = await fetch(`http://localhost:8080${endpoint}`, {
+      // UPDATED TO RENDER URL
+      const response = await fetch(`https://nexuscloud-project-setu-v7.onrender.com${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
@@ -342,7 +343,8 @@ function Dashboard({ token }) {
     setCurrentStep(3); 
 
     try {
-      const response = await fetch('http://localhost:8080/api/v1/deploy', {
+      // UPDATED TO RENDER URL
+      const response = await fetch('https://nexuscloud-project-setu-v7.onrender.com/api/v1/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ github_url: repoUrl, target_port: parseInt(targetPort), region: selectedRegion }) 
@@ -352,7 +354,8 @@ function Dashboard({ token }) {
       if (!response.ok || !data.success) throw new Error(data.error || 'Deployment pipeline rejected configuration parameters.');
       
       if (data.container_id) {
-        const ws = new WebSocket(`ws://localhost:8080/ws/client/${data.container_id}`);
+        // UPDATED SECURE WEBSOCKET URL
+        const ws = new WebSocket(`wss://nexuscloud-project-setu-v7.onrender.com/ws/client/${data.container_id}`);
         
         const freshDeployment = {
           id: data.container_id,
@@ -395,7 +398,8 @@ function Dashboard({ token }) {
     ));
 
     try {
-      await fetch(`http://localhost:8080/api/v1/deploy/${containerId}`, { method: 'DELETE' });
+      // UPDATED TO RENDER URL
+      await fetch(`https://nexuscloud-project-setu-v7.onrender.com/api/v1/deploy/${containerId}`, { method: 'DELETE' });
       
       // 2. Wait 3 seconds so the user can read the teardown logs in the terminal!
       setTimeout(() => {
