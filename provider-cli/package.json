@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "description": "",
   "main": "main.js",
+  "bin": "index.js",
   "scripts": {
     "start": "electron .",
     "build:linux": "electron-builder --linux",
-    "build:win": "electron-builder --win"
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build-all": "electron-builder --win --linux --mac"
   },
   "keywords": [],
   "author": "",
@@ -17,8 +20,32 @@
     "chalk": "^4.1.2",
     "dockerode": "^5.0.0",
     "express": "^5.2.1",
+    "node-fetch": "^3.3.2",
     "simple-git": "^3.36.0",
     "tar-fs": "^3.1.2",
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "electron": "^25.0.0",
+    "electron-builder": "^24.6.3"
+  },
+  "build": {
+    "appId": "com.nexus.edge.provider",
+    "productName": "NexusProviderEngine",
+    "directories": {
+      "output": "../dashboard/public"
+    },
+    "linux": {
+      "target": "AppImage",
+      "artifactName": "gui-linux"
+    },
+    "win": {
+      "target": "portable",
+      "artifactName": "gui-win.exe"
+    },
+    "mac": {
+      "target": "dmg",
+      "artifactName": "gui-macos"
+    }
   }
 }

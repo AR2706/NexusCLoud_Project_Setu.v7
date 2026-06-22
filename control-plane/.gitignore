@@ -1,0 +1,6 @@
+# Ignore compiled desktop executable files
+*.exe
+*.AppImage
+*.dmg
+*.zip
+dist/
