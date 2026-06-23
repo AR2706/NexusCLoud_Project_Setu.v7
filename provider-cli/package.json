@@ -1,51 +1,46 @@
 {
-  "name": "provider-cli",
+  "name": "nexus-edge-engine",
   "version": "1.0.0",
-  "description": "",
+  "description": "Decentralized mesh network micro-orchestrator running native edge runtimes.",
   "main": "gui.js",
-  "bin": "index.js",
   "scripts": {
     "start": "electron .",
-    "build:linux": "electron-builder --linux",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac",
     "build-all": "electron-builder --win --linux --mac"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "author": "Aritra Pradhan",
+  "license": "MIT",
   "dependencies": {
-    "axios": "^1.18.0",
+    "axios": "^1.7.2",
     "chalk": "^4.1.2",
-    "dockerode": "^5.0.0",
-    "express": "^5.2.1",
-    "node-fetch": "^3.3.2",
-    "simple-git": "^3.36.0",
-    "tar-fs": "^3.1.2",
-    "ws": "^8.21.0"
+    "dockerode": "^4.0.2",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0",
+    "simple-git": "^3.24.0",
+    "tar-fs": "^3.0.6",
+    "ws": "^8.17.0"
   },
   "devDependencies": {
-    "electron": "^25.0.0",
-    "electron-builder": "^24.6.3"
+    "electron": "^25.9.8",
+    "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.nexus.edge.provider",
-    "productName": "NexusProviderEngine",
+    "appId": "com.nexus.edge.engine",
+    "productName": "NexusEdgeEngine",
     "directories": {
       "output": "../dashboard/public"
-    },
-    "linux": {
-      "target": "AppImage",
-      "artifactName": "gui-linux"
     },
     "win": {
       "target": "portable",
       "artifactName": "gui-win.exe"
     },
+    "linux": {
+      "target": "AppImage",
+      "artifactName": "gui-linux",
+      "category": "Utility"
+    },
     "mac": {
-      "target": "dmg",
-      "artifactName": "gui-macos"
+      "target": "zip",
+      "artifactName": "gui-macos.zip"
     }
   }
 }

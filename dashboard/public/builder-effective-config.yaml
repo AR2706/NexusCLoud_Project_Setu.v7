@@ -1,16 +1,17 @@
 directories:
   output: ../dashboard/public
   buildResources: build
-appId: com.nexus.edge.provider
-productName: NexusProviderEngine
-linux:
-  target: AppImage
-  artifactName: gui-linux
+appId: com.nexus.edge.engine
+productName: NexusEdgeEngine
 win:
   target: portable
   artifactName: gui-win.exe
+linux:
+  target: AppImage
+  artifactName: gui-linux
+  category: Utility
 mac:
-  target: dmg
-  artifactName: gui-macos
+  target: zip
+  artifactName: gui-macos.zip
 files: []
 electronVersion: 25.9.8

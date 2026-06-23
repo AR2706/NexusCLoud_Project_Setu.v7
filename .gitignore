@@ -1,0 +1,5 @@
+provider-cli/node_modules/
+dashboard/public/win-unpacked/
+dashboard/public/linux-unpacked/
+dashboard/public/mac/
+dashboard/public/gui-*

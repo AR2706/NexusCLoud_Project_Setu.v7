@@ -1,5 +1,4 @@
-import fetch from "node-fetch";
-import { WebSocket } from "ws";
+const { WebSocket } = require("ws");
 
 // Hardcoded production backend control plane
 const BACKEND_URL = "https://nexuscloud-project-setu-v7.onrender.com";
@@ -19,6 +18,9 @@ if (!nodeId) {
  * Communicates with the control plane to register/verify the node
  */
 async function joinNetwork(nodeId, region) {
+  // 🔥 FIX: Dynamically import node-fetch to bypass the ES Module crash
+  const { default: fetch } = await import("node-fetch");
+
   const targetUrl = `${BACKEND_URL}/api/nodes/join`;
   console.log(`📡 Attempting to connect to Control Plane at: ${targetUrl}...`);
 
