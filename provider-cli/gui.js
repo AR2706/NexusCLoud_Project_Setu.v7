@@ -1,8 +1,10 @@
+const { app: electronApp, BrowserWindow } = require("electron");
 const express = require("express");
 const axios = require("axios");
 const chalk = require("chalk");
 const os = require("os");
 const { spawn, exec } = require("child_process");
+const path = require("path");
 
 // ==========================================
 // 🛡️ HIGH AVAILABILITY (HA) FAILOVER MODULE
@@ -92,7 +94,7 @@ app.use(express.json());
 let authToken = null;
 let activeRegion = null;
 
-// ✅ FIXED: Point this to your Render URL for production!
+// Point this to your Render URL for production!
 let controlPlaneUrl = "https://nexuscloud-project-setu-v7.onrender.com";
 
 // --- API ROUTES FOR THE DESKTOP UI ---
@@ -295,49 +297,84 @@ app.get("/", (req, res) => {
         </script>
     </body>
     </html>
-    `);
+  `);
 });
 
 // ==========================================
-// 🪟 NATIVE APP LAUNCHER & INITIALIZATION
+// 🪟 NATIVE ELECTRON APP LIFECYCLE
 // ==========================================
 const GUI_PORT = 9000;
+let server;
+let mainWindow;
 
-app.listen(GUI_PORT, () => {
-  console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1000,
+    height: 700,
+    title: "Nexus Provider Engine",
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
 
-  // Check if user passed HA command line arguments
-  const args = process.argv.slice(2);
-  if (args[0] === "--backup" && args[1] && args[2]) {
-    const primaryIp = args[1];
-    const ngrokDomain = args[2];
-    const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
-    watcher.start();
-  } else {
-    console.log(
-      chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
-    );
-  }
+  // Load the local Express server into the native Electron window
+  mainWindow.loadURL(`http://localhost:${GUI_PORT}`);
 
-  const url = `http://localhost:${GUI_PORT}`;
-  console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+}
 
-  let command;
-  if (process.platform === "win32") {
-    command = `start chrome --app=${url} || start msedge --app=${url}`;
-  } else if (process.platform === "darwin") {
-    command = `open -n -a "Google Chrome" --args --app=${url}`;
-  } else {
-    command = `google-chrome --app=${url} || chromium-browser --app=${url} || firefox -new-window ${url} || xdg-open ${url}`;
-  }
+electronApp.whenReady().then(() => {
+  // 1. Start the Express server and save it to the 'server' variable
+  server = app.listen(GUI_PORT, () => {
+    console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
 
-  exec(command, (err) => {
-    if (err) {
+    // 2. Check if user passed HA command line arguments
+    const args = process.argv;
+    const backupIndex = args.indexOf("--backup");
+
+    if (backupIndex !== -1 && args[backupIndex + 1] && args[backupIndex + 2]) {
+      const primaryIp = args[backupIndex + 1];
+      const ngrokDomain = args[backupIndex + 2];
+      const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
+      watcher.start();
+    } else {
       console.log(
-        chalk.yellow(
-          `   └─ ⚠️ Auto-launch failed. Please open ${url} in your browser.`,
-        ),
+        chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
       );
     }
+
+    console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
+
+    // 3. Open the actual Window
+    createWindow();
   });
+
+  electronApp.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+// 🛑 GRACEFUL SHUTDOWN: When all windows are closed, kill the port!
+electronApp.on("window-all-closed", () => {
+  console.log(chalk.yellow("Initiating shutdown sequence..."));
+
+  if (server) {
+    server.close(() => {
+      console.log(chalk.green("✅ Port 9000 released successfully."));
+    });
+  }
+
+  if (process.platform !== "darwin") {
+    electronApp.quit();
+  }
+});
+
+electronApp.on("before-quit", () => {
+  if (server) {
+    server.close();
+  }
 });
