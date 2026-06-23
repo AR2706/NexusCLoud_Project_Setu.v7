@@ -77,7 +77,7 @@ function DownloadPage() {
             <span style={{ fontSize: '2rem' }}>🪟</span>
             <h3 style={{ margin: 0, fontSize: '1.4rem' }}>Windows</h3>
           </div>
-          <a href="/gui-win.exe" download className="btn btn-primary" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '0.8rem', borderRadius: '10px', fontSize: '1rem', fontWeight: '600', marginBottom: '2rem' }}>
+          <a href="https://github.com/AR2706/NexusCLoud_Project_Setu.v7/releases/download/v1.0.0/gui-win.exe" className="btn btn-primary" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '0.8rem', borderRadius: '10px', fontSize: '1rem', fontWeight: '600', marginBottom: '2rem' }}>
             <Download size={18} /> Download .exe
           </a>
           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '1.2rem', flex: 1 }}>
@@ -97,7 +97,7 @@ function DownloadPage() {
             <span style={{ fontSize: '2rem' }}>🍎</span>
             <h3 style={{ margin: 0, fontSize: '1.4rem' }}>macOS</h3>
           </div>
-          <a href="/gui-macos" download className="btn btn-primary" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '0.8rem', borderRadius: '10px', fontSize: '1rem', fontWeight: '600', marginBottom: '2rem' }}>
+          <a href="https://github.com/AR2706/NexusCLoud_Project_Setu.v7/releases/download/v1.0.0/gui-macos" className="btn btn-primary" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '0.8rem', borderRadius: '10px', fontSize: '1rem', fontWeight: '600', marginBottom: '2rem' }}>
             <Download size={18} /> Download Binary
           </a>
           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '1.2rem', flex: 1 }}>
@@ -117,7 +117,7 @@ function DownloadPage() {
             <span style={{ fontSize: '2rem' }}>🐧</span>
             <h3 style={{ margin: 0, fontSize: '1.4rem' }}>Linux <span style={{fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 'normal'}}>(Ubuntu/Debian)</span></h3>
           </div>
-          <a href="/gui-linux" download className="btn btn-primary" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '0.8rem', borderRadius: '10px', fontSize: '1rem', fontWeight: '600', marginBottom: '2rem' }}>
+          <a href="https://github.com/AR2706/NexusCLoud_Project_Setu.v7/releases/download/v1.0.0/gui-linux" className="btn btn-primary" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '0.8rem', borderRadius: '10px', fontSize: '1rem', fontWeight: '600', marginBottom: '2rem' }}>
             <Download size={18} /> Download Binary
           </a>
           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '1.2rem', flex: 1 }}>
@@ -153,7 +153,6 @@ function LoginPage({ onLogin }) {
     const endpoint = isRegistering ? '/api/v1/auth/register' : '/api/v1/auth/provider';
 
     try {
-      // UPDATED TO RENDER URL
       const response = await fetch(`https://nexuscloud-project-setu-v7.onrender.com${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -343,7 +342,6 @@ function Dashboard({ token }) {
     setCurrentStep(3); 
 
     try {
-      // UPDATED TO RENDER URL
       const response = await fetch('https://nexuscloud-project-setu-v7.onrender.com/api/v1/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -354,7 +352,6 @@ function Dashboard({ token }) {
       if (!response.ok || !data.success) throw new Error(data.error || 'Deployment pipeline rejected configuration parameters.');
       
       if (data.container_id) {
-        // UPDATED SECURE WEBSOCKET URL
         const ws = new WebSocket(`wss://nexuscloud-project-setu-v7.onrender.com/ws/client/${data.container_id}`);
         
         const freshDeployment = {
@@ -363,7 +360,7 @@ function Dashboard({ token }) {
           repo: repoUrl,
           region: regions.find(r => r.id === selectedRegion),
           port: targetPort,
-          isTerminating: false // Ensure state starts as false
+          isTerminating: false
         };
         
         setActiveDeployments(prev => [...prev, freshDeployment]);
@@ -392,23 +389,19 @@ function Dashboard({ token }) {
   };
 
   const handleTeardown = async (containerId) => {
-    // 1. Optimistically set to "terminating" to prevent double clicks
     setActiveDeployments(prev => prev.map(dep => 
       dep.id === containerId ? { ...dep, isTerminating: true } : dep
     ));
 
     try {
-      // UPDATED TO RENDER URL
       await fetch(`https://nexuscloud-project-setu-v7.onrender.com/api/v1/deploy/${containerId}`, { method: 'DELETE' });
       
-      // 2. Wait 3 seconds so the user can read the teardown logs in the terminal!
       setTimeout(() => {
         setActiveDeployments(prev => prev.filter(dep => dep.id !== containerId));
       }, 3000);
       
     } catch (err) {
       console.error("Teardown transaction fault:", err);
-      // Revert button if it failed
       setActiveDeployments(prev => prev.map(dep => 
         dep.id === containerId ? { ...dep, isTerminating: false } : dep
       ));
@@ -444,7 +437,7 @@ function Dashboard({ token }) {
             { step: 3, name: 'Production Build Output', icon: <Terminal size={16} /> }
           ].map((s) => (
             <div key={s.step} onClick={() => !isDeploying && currentStep > s.step && setCurrentStep(s.step)} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: currentStep === s.step ? '#0070f3' : currentStep > s.step ? '#10b981' : 'var(--text-muted)', fontWeight: '600', cursor: (currentStep > s.step && !isDeploying) ? 'pointer' : 'default', fontSize: '0.95rem' }}>
-              <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '24px', height: '24px', borderRadius: '50%', background: currentStep === s.step ? 'rgba(0,112,243,0.1)' : currentStep > s.step ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.03)', border: '1px solid currentColor', fontSize: '0.8rem' }}>
+              <span style={{ display: 'flex', alignItems: 'center', justify-content: 'center', width: '24px', height: '24px', borderRadius: '50%', background: currentStep === s.step ? 'rgba(0,112,243,0.1)' : currentStep > s.step ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.03)', border: '1px solid currentColor', fontSize: '0.8rem' }}>
                 {currentStep > s.step ? <CheckCircle size={14} /> : s.step}
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>{s.icon} {s.name}</span>
