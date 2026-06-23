@@ -1,64 +1,86 @@
-const express = require('express');
-const axios = require('axios');
-const chalk = require('chalk');
-const os = require('os');
-const { spawn, exec } = require('child_process');
+const express = require("express");
+const axios = require("axios");
+const chalk = require("chalk");
+const os = require("os");
+const { spawn, exec } = require("child_process");
 
 // ==========================================
 // 🛡️ HIGH AVAILABILITY (HA) FAILOVER MODULE
 // ==========================================
 class HighAvailabilityWatcher {
-    constructor(primaryIp, staticNgrokDomain, targetPort) {
-        this.primaryIp = primaryIp;
-        this.staticNgrokDomain = staticNgrokDomain;
-        this.targetPort = targetPort;
-        
-        this.failCount = 0;
-        this.maxFails = 3;         // 3 missed pings = Node Death
-        this.checkInterval = 5000; // Ping every 5 seconds
+  constructor(primaryIp, staticNgrokDomain, targetPort) {
+    this.primaryIp = primaryIp;
+    this.staticNgrokDomain = staticNgrokDomain;
+    this.targetPort = targetPort;
+
+    this.failCount = 0;
+    this.maxFails = 3; // 3 missed pings = Node Death
+    this.checkInterval = 5000; // Ping every 5 seconds
+    this.hasTakenOver = false;
+  }
+
+  start() {
+    console.log(chalk.cyan(`\n[HA-WATCHER] 🛡️ Active-Passive Failover Armed.`));
+    console.log(
+      chalk.gray(
+        `[HA-WATCHER] Monitoring Primary Node at ${this.primaryIp}...`,
+      ),
+    );
+
+    setInterval(() => this.pingPrimary(), this.checkInterval);
+  }
+
+  async pingPrimary() {
+    if (this.hasTakenOver) return;
+
+    try {
+      // Ping the GUI status endpoint on the primary machine
+      await axios.get(`http://${this.primaryIp}:9000/api/status`, {
+        timeout: 3000,
+      });
+      this.failCount = 0;
+    } catch (error) {
+      this.failCount++;
+      console.log(
+        chalk.yellow(
+          `[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`,
+        ),
+      );
+
+      if (this.failCount >= this.maxFails) {
+        this.triggerFailover();
+      }
+    }
+  }
+
+  triggerFailover() {
+    this.hasTakenOver = true;
+    console.log(
+      chalk.bgRed.white.bold(
+        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`,
+      ),
+    );
+
+    // Hijack the static Ngrok URL
+    const ngrokCommand = `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`;
+
+    exec(ngrokCommand, (error) => {
+      if (error) {
+        console.error(
+          chalk.red(
+            `[HA-WATCHER] Failed to hijack Ngrok tunnel: ${error.message}`,
+          ),
+        );
         this.hasTakenOver = false;
-    }
+      }
+    });
 
-    start() {
-        console.log(chalk.cyan(`\n[HA-WATCHER] 🛡️ Active-Passive Failover Armed.`));
-        console.log(chalk.gray(`[HA-WATCHER] Monitoring Primary Node at ${this.primaryIp}...`));
-        
-        setInterval(() => this.pingPrimary(), this.checkInterval);
-    }
-
-    async pingPrimary() {
-        if (this.hasTakenOver) return; 
-
-        try {
-            // Ping the GUI status endpoint on the primary machine
-            await axios.get(`http://${this.primaryIp}:9000/api/status`, { timeout: 3000 });
-            this.failCount = 0; 
-        } catch (error) {
-            this.failCount++;
-            console.log(chalk.yellow(`[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`));
-
-            if (this.failCount >= this.maxFails) {
-                this.triggerFailover();
-            }
-        }
-    }
-
-    triggerFailover() {
-        this.hasTakenOver = true;
-        console.log(chalk.bgRed.white.bold(`\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`));
-
-        // Hijack the static Ngrok URL
-        const ngrokCommand = `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`;
-
-        exec(ngrokCommand, (error) => {
-            if (error) {
-                console.error(chalk.red(`[HA-WATCHER] Failed to hijack Ngrok tunnel: ${error.message}`));
-                this.hasTakenOver = false; 
-            }
-        });
-        
-        console.log(chalk.green(`[HA-WATCHER] ✅ Secondary Node successfully took control of ${this.staticNgrokDomain}!`));
-    }
+    console.log(
+      chalk.green(
+        `[HA-WATCHER] ✅ Secondary Node successfully took control of ${this.staticNgrokDomain}!`,
+      ),
+    );
+  }
 }
 
 // ==========================================
@@ -70,71 +92,87 @@ app.use(express.json());
 let authToken = null;
 let activeRegion = null;
 
-// Point this to your Render URL (e.g., "https://nexus-brain.onrender.com") when deploying to production
-let controlPlaneUrl = "http://localhost:8080"; 
+// ✅ FIXED: Point this to your Render URL for production!
+let controlPlaneUrl = "https://nexuscloud-project-setu-v7.onrender.com";
 
 // --- API ROUTES FOR THE DESKTOP UI ---
 
-app.post('/api/register', async (req, res) => {
-    try {
-        const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/register`, {
-            email: req.body.email,
-            password: req.body.password,
-            region: req.body.region
-        });
-        
-        if (response.data.success) {
-            authToken = response.data.token;
-            activeRegion = req.body.region || 'global';
-            
-            console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
-            spawn('node', ['index.js', authToken, activeRegion], { stdio: 'inherit' });
-            res.json({ success: true, region: activeRegion });
-        } else {
-            res.status(400).json({ success: false, error: response.data.error });
-        }
-    } catch (err) {
-        res.status(500).json({ success: false, error: "Control Plane unreachable." });
+app.post("/api/register", async (req, res) => {
+  try {
+    const response = await axios.post(
+      `${controlPlaneUrl}/api/v1/auth/register`,
+      {
+        email: req.body.email,
+        password: req.body.password,
+        region: req.body.region,
+      },
+    );
+
+    if (response.data.success) {
+      authToken = response.data.token;
+      activeRegion = req.body.region || "global";
+
+      console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
+      spawn("node", ["index.js", authToken, activeRegion], {
+        stdio: "inherit",
+      });
+      res.json({ success: true, region: activeRegion });
+    } else {
+      res.status(400).json({ success: false, error: response.data.error });
     }
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, error: "Control Plane unreachable." });
+  }
 });
 
-app.post('/api/login', async (req, res) => {
-    try {
-        const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/provider`, {
-            email: req.body.email,
-            password: req.body.password,
-            region: req.body.region
-        });
-        
-        if (response.data.success) {
-            authToken = response.data.token;
-            activeRegion = req.body.region || 'global';
-            
-            console.log(chalk.green(`\n🔐 Authentication Successful! Token acquired.`));
-            spawn('node', ['index.js', authToken, activeRegion], { stdio: 'inherit' });
-            res.json({ success: true, region: activeRegion });
-        } else {
-            res.status(401).json({ success: false, error: response.data.error });
-        }
-    } catch (err) {
-        res.status(500).json({ success: false, error: "Control Plane unreachable." });
+app.post("/api/login", async (req, res) => {
+  try {
+    const response = await axios.post(
+      `${controlPlaneUrl}/api/v1/auth/provider`,
+      {
+        email: req.body.email,
+        password: req.body.password,
+        region: req.body.region,
+      },
+    );
+
+    if (response.data.success) {
+      authToken = response.data.token;
+      activeRegion = req.body.region || "global";
+
+      console.log(
+        chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
+      );
+      spawn("node", ["index.js", authToken, activeRegion], {
+        stdio: "inherit",
+      });
+      res.json({ success: true, region: activeRegion });
+    } else {
+      res.status(401).json({ success: false, error: response.data.error });
     }
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, error: "Control Plane unreachable." });
+  }
 });
 
 // Telemetry/Status Route (Also used by HA-Watcher to check if node is alive)
-app.get('/api/status', (req, res) => {
-    res.json({
-        authenticated: authToken !== null,
-        region: activeRegion,
-        cores: os.cpus().length,
-        ram: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
-        status: "alive"
-    });
+app.get("/api/status", (req, res) => {
+  res.json({
+    authenticated: authToken !== null,
+    region: activeRegion,
+    cores: os.cpus().length,
+    ram: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
+    status: "alive",
+  });
 });
 
 // --- THE DESKTOP FRONTEND (Served from Memory) ---
-app.get('/', (req, res) => {
-    res.send(`
+app.get("/", (req, res) => {
+  res.send(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -266,34 +304,40 @@ app.get('/', (req, res) => {
 const GUI_PORT = 9000;
 
 app.listen(GUI_PORT, () => {
-    console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
-    
-    // Check if user passed HA command line arguments
-    const args = process.argv.slice(2);
-    if (args[0] === '--backup' && args[1] && args[2]) {
-        const primaryIp = args[1];
-        const ngrokDomain = args[2];
-        const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
-        watcher.start();
-    } else {
-        console.log(chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`));
+  console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
+
+  // Check if user passed HA command line arguments
+  const args = process.argv.slice(2);
+  if (args[0] === "--backup" && args[1] && args[2]) {
+    const primaryIp = args[1];
+    const ngrokDomain = args[2];
+    const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
+    watcher.start();
+  } else {
+    console.log(
+      chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
+    );
+  }
+
+  const url = `http://localhost:${GUI_PORT}`;
+  console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
+
+  let command;
+  if (process.platform === "win32") {
+    command = `start chrome --app=${url} || start msedge --app=${url}`;
+  } else if (process.platform === "darwin") {
+    command = `open -n -a "Google Chrome" --args --app=${url}`;
+  } else {
+    command = `google-chrome --app=${url} || chromium-browser --app=${url} || firefox -new-window ${url} || xdg-open ${url}`;
+  }
+
+  exec(command, (err) => {
+    if (err) {
+      console.log(
+        chalk.yellow(
+          `   └─ ⚠️ Auto-launch failed. Please open ${url} in your browser.`,
+        ),
+      );
     }
-
-    const url = `http://localhost:${GUI_PORT}`;
-    console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
-
-    let command;
-    if (process.platform === 'win32') {
-        command = `start chrome --app=${url} || start msedge --app=${url}`;
-    } else if (process.platform === 'darwin') {
-        command = `open -n -a "Google Chrome" --args --app=${url}`;
-    } else {
-        command = `google-chrome --app=${url} || chromium-browser --app=${url} || firefox -new-window ${url} || xdg-open ${url}`;
-    }
-
-    exec(command, (err) => {
-        if (err) {
-            console.log(chalk.yellow(`   └─ ⚠️ Auto-launch failed. Please open ${url} in your browser.`));
-        }
-    });
+  });
 });

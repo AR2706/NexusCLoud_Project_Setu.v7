@@ -2,7 +2,7 @@
   "name": "provider-cli",
   "version": "1.0.0",
   "description": "",
-  "main": "main.js",
+  "main": "gui.js",
   "bin": "index.js",
   "scripts": {
     "start": "electron .",
