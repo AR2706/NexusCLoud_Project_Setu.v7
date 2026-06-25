@@ -32,25 +32,20 @@ db = client.nexus_db # Update this to your actual database name if different
 # ==========================================
 class ConnectionManager:
     def __init__(self):
-        # Maps Region -> List of connected Desktop Engine WebSockets
         self.providers: Dict[str, List[WebSocket]] = {}
-        # Maps DeploymentID -> Vercel UI WebSocket
         self.clients: Dict[str, WebSocket] = {}
+        self.pending_logs: Dict[str, List[str]] = {} # NEW: Buffer logs
         
-    async def connect_provider(self, websocket: WebSocket, region: str):
-        await websocket.accept()
-        if region not in self.providers:
-            self.providers[region] = []
-        self.providers[region].append(websocket)
-        
-    def disconnect_provider(self, websocket: WebSocket, region: str):
-        if region in self.providers and websocket in self.providers[region]:
-            self.providers[region].remove(websocket)
-            
     async def connect_client(self, websocket: WebSocket, deployment_id: str):
         await websocket.accept()
         self.clients[deployment_id] = websocket
         
+        # NEW: Flush any logs that arrived while the client was connecting
+        if deployment_id in self.pending_logs:
+            for log in self.pending_logs[deployment_id]:
+                await websocket.send_text(log)
+            del self.pending_logs[deployment_id]
+            
     def disconnect_client(self, deployment_id: str):
         if deployment_id in self.clients:
             del self.clients[deployment_id]
@@ -58,6 +53,12 @@ class ConnectionManager:
     async def send_log_to_client(self, deployment_id: str, log: str):
         if deployment_id in self.clients:
             await self.clients[deployment_id].send_text(log)
+        else:
+            # NEW: Buffer the log instead of dropping it
+            if deployment_id not in self.pending_logs:
+                self.pending_logs[deployment_id] = []
+            self.pending_logs[deployment_id].append(log)
+            print(f"DEBUG: Client {deployment_id} not connected. Buffering log.")
 
 manager = ConnectionManager()
 
@@ -93,6 +94,7 @@ async def login(req: AuthRequest):
 @app.post("/api/v1/deploy")
 async def deploy_workload(req: DeployRequest):
     deployment_id = f"nexus-app-{uuid.uuid4().hex[:8]}"
+    print(f"DEBUG: Generated ID: {deployment_id}") #
     region = req.region
     
     # Optional: Save deployment metadata to MongoDB here

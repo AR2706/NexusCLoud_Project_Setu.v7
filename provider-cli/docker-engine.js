@@ -30,15 +30,22 @@ function checkCommandExists(command) {
     exec(`${command} --version`, { shell: true }, (err) => resolve(!err));
   });
 }
+// This works on EVERY machine, regardless of username
+function getCloudflaredPath() {
+  const binName = isWin ? "cloudflared.exe" : "cloudflared";
+  return path.join(os.homedir(), binName);
+}
 
 function downloadCloudflared(streamLog) {
   return new Promise((resolve, reject) => {
-    const binName = isWin ? "cloudflared.exe" : "cloudflared";
-    const downloadPath = path.join(os.homedir(), binName);
+    const downloadPath = getCloudflaredPath(); // Dynamic path based on user
 
     if (fs.existsSync(downloadPath)) return resolve(downloadPath);
 
-    streamLog(`[System] 📥 Cloudflared missing. Auto-downloading...\n`);
+    streamLog(
+      `[System] 📥 Cloudflared missing. Auto-downloading to ${downloadPath}...\n`,
+    );
+
     const url = isWin
       ? "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
       : "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64";
@@ -49,7 +56,7 @@ function downloadCloudflared(streamLog) {
         response.pipe(file);
         file.on("finish", () => {
           file.close();
-          if (!isWin) fs.chmodSync(downloadPath, 0o755);
+          if (!isWin) fs.chmodSync(downloadPath, 0o755); // Essential for Linux
           streamLog(`[System] ✅ Download complete.\n`);
           resolve(downloadPath);
         });
@@ -79,46 +86,26 @@ async function runPreFlightChecks(streamLog) {
 // ==========================================
 function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
   return new Promise((resolve, reject) => {
-    // Force absolute path for the binary
-    const cmd = fs.existsSync(cloudflaredPath)
-      ? `"${cloudflaredPath}"`
-      : "cloudflared";
-    const args = [
-      "tunnel",
-      "--no-autoupdate",
-      "--url",
-      `http://127.0.0.1:${localPort}`,
-    ];
+    // We use the 'lt' command directly
+    const cmd = `lt --port ${localPort}`;
 
-    streamLog(`\n[System] Launching Cloudflare Tunnel (Cmd: ${cmd})...\n`);
-
-    const tunnelProcess = spawn(cmd, args, { shell: true });
+    streamLog(`\n[System] Launching Localtunnel on port ${localPort}...\n`);
+    const tunnelProcess = spawn(cmd, { shell: true });
 
     let found = false;
 
-    // NEW: Catch if the process dies instantly
-    tunnelProcess.on("close", (code) => {
-      if (code !== 0 && !found) {
-        streamLog(
-          `[Tunnel Error] Process exited with code ${code}. Check if cloudflared is installed/executable.\n`,
-        );
-      }
-    });
-
-    const parseOutput = (data) => {
+    tunnelProcess.stdout.on("data", (data) => {
       const output = data.toString();
-      streamLog(`[Cloudflare] ${output}`);
-      const urlMatch = output.match(
-        /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/,
-      );
+      streamLog(`[Tunnel]: ${output}`);
+
+      // Localtunnel prints the URL as: "your url is: https://..."
+      const urlMatch = output.match(/https:\/\/[a-z0-9-]+\.loca\.lt/);
+
       if (urlMatch && !found) {
         found = true;
         resolve({ publicUrl: urlMatch[0], processId: tunnelProcess.pid });
       }
-    };
-
-    tunnelProcess.stdout.on("data", parseOutput);
-    tunnelProcess.stderr.on("data", parseOutput);
+    });
 
     tunnelProcess.on("error", (err) => {
       streamLog(`[Tunnel Error] ${err.message}\n`);
@@ -127,9 +114,13 @@ function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
     setTimeout(() => {
       if (!found) {
         tunnelProcess.kill();
-        reject(new Error("Cloudflare timeout."));
+        reject(
+          new Error(
+            "Tunnel timeout: Ensure localtunnel is installed (npm install -g localtunnel).",
+          ),
+        );
       }
-    }, 30000);
+    }, 20000);
   });
 }
 
