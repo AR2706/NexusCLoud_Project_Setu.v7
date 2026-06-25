@@ -56,28 +56,29 @@ function initializeEdgeNode(token, region) {
   wsClient.on("message", async (data) => {
     try {
       const msg = JSON.parse(data.toString());
+      console.log(
+        chalk.magenta(`[DEBUG] RAW PAYLOAD:`),
+        JSON.stringify(msg, null, 2),
+      );
 
-      // 🔥 THE DEBUGGER: This will print the exact structure sent by Python
-      console.log(chalk.magenta(`\n[DEBUG] RAW PAYLOAD RECEIVED:`));
-      console.log(chalk.magenta(JSON.stringify(msg, null, 2)));
-
-      // Fallback check to see if your backend uses 'action' or 'type' instead of 'command'
+      // Capture the command from the backend
       const commandToRun = msg.command || msg.action || msg.type;
-
       console.log(chalk.blue(`[WS] Parsed Command: ${commandToRun}`));
 
-      // This function MUST be perfectly structured
+      // Define the stream function to pipe logs back to the server
       const stream = (l) => {
         if (wsClient.readyState === WebSocket.OPEN) {
-          const logPayload = {
-            type: "BUILD_LOG",
-            containerId: msg.containerId,
-            log: l.toString(),
-          };
-          wsClient.send(JSON.stringify(logPayload));
+          wsClient.send(
+            JSON.stringify({
+              type: "BUILD_LOG",
+              containerId: msg.containerId,
+              log: l.toString(),
+            }),
+          );
         }
       };
 
+      // 🔥 THIS IS WHAT YOU WERE MISSING: Executing the function!
       if (commandToRun === "DEPLOY_WORKLOAD") {
         console.log(chalk.yellow(`[System] Executing: ${msg.github_url}`));
         const result = await deployWorkload(
@@ -87,9 +88,7 @@ function initializeEdgeNode(token, region) {
           msg.targetPort,
           stream,
         );
-        if (!result.success) {
-          stream(`\n❌ ERROR: ${result.error}\n`);
-        }
+        if (!result.success) stream(`\n❌ ERROR: ${result.error}\n`);
       } else if (commandToRun === "STOP_WORKLOAD") {
         await teardownWorkload(msg.containerId, stream);
       }
