@@ -66,15 +66,21 @@ function initializeEdgeNode(token, region) {
       console.log(chalk.blue(`[WS] Parsed Command: ${commandToRun}`));
 
       // Define the stream function to pipe logs back to the server
+      // Inside gui.js, in the wsClient.on("message"...) block
       const stream = (l) => {
+        const logMsg = l.toString();
+        console.log(chalk.gray(`[Stream] ${logMsg}`)); // Local terminal visibility
+
         if (wsClient.readyState === WebSocket.OPEN) {
           wsClient.send(
             JSON.stringify({
               type: "BUILD_LOG",
               containerId: msg.containerId,
-              log: l.toString(),
+              log: logMsg,
             }),
           );
+        } else {
+          console.warn(chalk.red("[WS] Cannot send log, socket not open."));
         }
       };
 

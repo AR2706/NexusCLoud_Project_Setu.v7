@@ -143,6 +143,7 @@ async function deployWorkload(
   onLog,
 ) {
   const streamLog = (msg) => {
+    console.log(chalk.gray(`[DEPLOY-LOG] ${msg}`));
     if (onLog) onLog(msg.toString());
   };
   const cloneDir = path.join(os.tmpdir(), containerId);
