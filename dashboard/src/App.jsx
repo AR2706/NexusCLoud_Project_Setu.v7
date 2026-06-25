@@ -1058,73 +1058,62 @@ function Dashboard({ token }) {
       const data = await response.json();
 
       if (!response.ok || !data.success)
-        throw new Error(
-          data.error || "Deployment pipeline rejected parameters.",
-        );
+        throw new Error(data.error || "Deployment pipeline rejected.");
 
-      if (data.container_id) {
+      // 🔥 CRITICAL: Delay the WebSocket connect to give the Backend time to init
+      setTimeout(() => {
         const wsUrl = `wss://nexuscloud-project-setu-v7.onrender.com/ws/client/${data.container_id}`;
-        console.log(`[DEBUG] Attempting WebSocket connection: ${wsUrl}`);
+        console.log(`[DEBUG] Attempting WS connection to: ${wsUrl}`);
         const ws = new WebSocket(wsUrl);
-
-        const freshDeployment = {
-          id: data.container_id,
-          url: null,
-          repo: repoUrl,
-          region: regions.find((r) => r.id === selectedRegion),
-          port: targetPort,
-          isTerminating: false,
-        };
-
-        setActiveDeployments((prev) => [...prev, freshDeployment]);
 
         ws.onopen = () => {
           setLiveLogs((prev) => [
             ...prev,
-            "[System] WebSocket Tunnel Established.\n",
+            "[System] Connection established to remote builder.\n",
           ]);
         };
 
         ws.onmessage = (event) => {
-          // SAFE PARSING: Handle both JSON and Plain Text
-          let logContent = event.data;
-
-          try {
-            const parsed = JSON.parse(event.data);
-            if (parsed.log) logContent = parsed.log;
-          } catch (e) {
-            // It's plain text, keep logContent as is
-          }
-
-          setLiveLogs((prev) => [...prev, logContent]);
-
-          // URL Extraction
-          const linkHarvest = logContent.match(
-            /https:\/\/[a-zA-Z0-9-]+\.loca\.lt|https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/,
-          );
-
-          if (linkHarvest) {
-            const liveUrl = linkHarvest[0];
-            setActiveDeployments((prev) =>
-              prev.map((dep) =>
-                dep.id === data.container_id ? { ...dep, url: liveUrl } : dep,
-              ),
+          setLiveLogs((prev) => [...prev, event.data]);
+          if (event.data.includes("https://")) {
+            const urlMatch = event.data.match(
+              /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com|https:\/\/[a-zA-Z0-9-]+\.loca\.lt/,
             );
+            if (urlMatch) {
+              setActiveDeployments((prev) =>
+                prev.map((dep) =>
+                  dep.id === data.container_id
+                    ? { ...dep, url: urlMatch[0] }
+                    : dep,
+                ),
+              );
+            }
           }
         };
 
         ws.onerror = (err) => {
           console.error("[WS] Error:", err);
-          setError("WebSocket connection error.");
+          setLiveLogs((prev) => [
+            ...prev,
+            "❌ WebSocket Error. Check Console.\n",
+          ]);
         };
-      }
+      }, 1000);
+
+      setActiveDeployments((prev) => [
+        ...prev,
+        {
+          id: data.container_id,
+          repo: repoUrl,
+          region: selectedRegion,
+          url: null,
+        },
+      ]);
     } catch (err) {
       setError(err.message);
       setCurrentStep(2);
       setIsDeploying(false);
     }
-    // Note: Do not set setIsDeploying(false) here,
-    // let it stay true while the deployment is active.
   };
 
   const handleTeardown = async (containerId) => {
