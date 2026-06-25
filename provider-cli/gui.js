@@ -3,8 +3,12 @@ const express = require("express");
 const axios = require("axios");
 const chalk = require("chalk");
 const os = require("os");
-const { spawn, exec, fork } = require("child_process");
+const { exec } = require("child_process");
 const path = require("path");
+const { WebSocket } = require("ws");
+
+// 🔥 FIX: Import the Docker Engine logic you wrote!
+const { deployWorkload, teardownWorkload } = require("./docker-engine");
 
 // ==========================================
 // 🛡️ HIGH AVAILABILITY (HA) FAILOVER MODULE
@@ -16,8 +20,8 @@ class HighAvailabilityWatcher {
     this.targetPort = targetPort;
 
     this.failCount = 0;
-    this.maxFails = 3; // 3 missed pings = Node Death
-    this.checkInterval = 5000; // Ping every 5 seconds
+    this.maxFails = 3;
+    this.checkInterval = 5000;
     this.hasTakenOver = false;
   }
 
@@ -28,15 +32,12 @@ class HighAvailabilityWatcher {
         `[HA-WATCHER] Monitoring Primary Node at ${this.primaryIp}...`,
       ),
     );
-
     setInterval(() => this.pingPrimary(), this.checkInterval);
   }
 
   async pingPrimary() {
     if (this.hasTakenOver) return;
-
     try {
-      // Ping the GUI status endpoint on the primary machine
       await axios.get(`http://${this.primaryIp}:9000/api/status`, {
         timeout: 3000,
       });
@@ -48,10 +49,7 @@ class HighAvailabilityWatcher {
           `[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`,
         ),
       );
-
-      if (this.failCount >= this.maxFails) {
-        this.triggerFailover();
-      }
+      if (this.failCount >= this.maxFails) this.triggerFailover();
     }
   }
 
@@ -62,10 +60,7 @@ class HighAvailabilityWatcher {
         `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`,
       ),
     );
-
-    // Hijack the static Ngrok URL
     const ngrokCommand = `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`;
-
     exec(ngrokCommand, (error) => {
       if (error) {
         console.error(
@@ -76,7 +71,6 @@ class HighAvailabilityWatcher {
         this.hasTakenOver = false;
       }
     });
-
     console.log(
       chalk.green(
         `[HA-WATCHER] ✅ Secondary Node successfully took control of ${this.staticNgrokDomain}!`,
@@ -86,16 +80,121 @@ class HighAvailabilityWatcher {
 }
 
 // ==========================================
-// 🚀 CORE EXPRESS ENGINE
+// 🚀 CORE EXPRESS ENGINE & EDGE TUNNEL
 // ==========================================
 const app = express();
 app.use(express.json());
 
 let authToken = null;
 let activeRegion = null;
+let edgeSocket = null;
 
 // Point this to your Render URL for production!
 let controlPlaneUrl = "https://nexuscloud-project-setu-v7.onrender.com";
+
+// 🔥 FIX: Native Edge Tunnel directly inside Electron
+function startEdgeTunnel(token, region) {
+  // Fix 1: Use the correct backend URL for providers!
+  const wsUrl =
+    controlPlaneUrl.replace(/^http/, "ws") + `/ws/provider/${token}/${region}`;
+  console.log(
+    chalk.magenta(`\n🔌 Initializing live workload tunnel to Control Plane...`),
+  );
+
+  edgeSocket = new WebSocket(wsUrl);
+
+  edgeSocket.on("open", () => {
+    console.log(
+      chalk.green(
+        "⚡ Secure Edge Tunnel established! Node is active on the grid.",
+      ),
+    );
+  });
+
+  edgeSocket.on("message", async (data) => {
+    try {
+      const message = JSON.parse(data.toString());
+      console.log(
+        chalk.blue(`📦 Deployment Command Received:`),
+        message.command,
+      );
+
+      // Fix 3: Execute the Docker engine natively when commands come in
+      if (message.command === "DEPLOY_WORKLOAD") {
+        console.log(
+          chalk.cyan(
+            `🚀 Provisioning target repo: ${message.github_url} on port ${message.targetPort}`,
+          ),
+        );
+
+        // Callback function to stream logs back to the Cloud
+        const streamToCloud = (logText) => {
+          if (edgeSocket && edgeSocket.readyState === WebSocket.OPEN) {
+            edgeSocket.send(
+              JSON.stringify({
+                type: "BUILD_LOG",
+                containerId: message.containerId,
+                log: logText,
+              }),
+            );
+          }
+        };
+
+        // Fire the actual Docker engine!
+        await deployWorkload(
+          message.github_url,
+          message.limits,
+          message.containerId,
+          message.targetPort,
+          streamToCloud,
+        );
+      } else if (message.command === "STOP_WORKLOAD") {
+        console.log(
+          chalk.yellow(`🛑 Terminating workload: ${message.containerId}`),
+        );
+
+        const streamToCloud = (logText) => {
+          if (edgeSocket && edgeSocket.readyState === WebSocket.OPEN) {
+            edgeSocket.send(
+              JSON.stringify({
+                type: "BUILD_LOG",
+                containerId: message.containerId,
+                log: logText,
+              }),
+            );
+          }
+        };
+
+        // Fire the actual Teardown engine!
+        await teardownWorkload(message.containerId, streamToCloud);
+      }
+    } catch (err) {
+      console.error(
+        chalk.red(
+          "⚠️ Failed to parse inbound orchestration frame:",
+          err.message,
+        ),
+      );
+    }
+  });
+
+  edgeSocket.on("close", (code) => {
+    console.warn(
+      chalk.yellow(
+        `⚠️ Tunnel disconnected (Code: ${code}). Reconnecting in 5 seconds...`,
+      ),
+    );
+    setTimeout(() => {
+      if (authToken) startEdgeTunnel(token, region);
+    }, 5000);
+  });
+
+  edgeSocket.on("error", (error) => {
+    console.error(
+      chalk.red("❌ Tunnel socket exception error:", error.message),
+    );
+  });
+}
 
 // --- API ROUTES FOR THE DESKTOP UI ---
 
@@ -113,11 +212,10 @@ app.post("/api/register", async (req, res) => {
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-
       console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
 
-      // 🔥 FIX: Use Electron's native fork to read inside the .asar archive
-      fork(path.join(__dirname, "index.js"), [authToken, activeRegion]);
+      // 🔥 FIX 4: Just start the tunnel natively instead of forking
+      startEdgeTunnel(authToken, activeRegion);
 
       res.json({ success: true, region: activeRegion });
     } else {
@@ -144,13 +242,12 @@ app.post("/api/login", async (req, res) => {
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-
       console.log(
         chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
       );
 
-      // 🔥 FIX: Use Electron's native fork to read inside the .asar archive
-      fork(path.join(__dirname, "index.js"), [authToken, activeRegion]);
+      // 🔥 FIX 4: Just start the tunnel natively instead of forking
+      startEdgeTunnel(authToken, activeRegion);
 
       res.json({ success: true, region: activeRegion });
     } else {
@@ -163,7 +260,6 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// Telemetry/Status Route (Also used by HA-Watcher to check if node is alive)
 app.get("/api/status", (req, res) => {
   res.json({
     authenticated: authToken !== null,
@@ -321,20 +417,16 @@ function createWindow() {
     },
   });
 
-  // Load the local Express server into the native Electron window
   mainWindow.loadURL(`http://localhost:${GUI_PORT}`);
-
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 }
 
 electronApp.whenReady().then(() => {
-  // 1. Start the Express server and save it to the 'server' variable
   server = app.listen(GUI_PORT, () => {
     console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
 
-    // 2. Check if user passed HA command line arguments
     const args = process.argv;
     const backupIndex = args.indexOf("--backup");
 
@@ -350,8 +442,6 @@ electronApp.whenReady().then(() => {
     }
 
     console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
-
-    // 3. Open the actual Window
     createWindow();
   });
 
@@ -360,23 +450,20 @@ electronApp.whenReady().then(() => {
   });
 });
 
-// 🛑 GRACEFUL SHUTDOWN: When all windows are closed, kill the port!
+// 🛑 GRACEFUL SHUTDOWN
 electronApp.on("window-all-closed", () => {
   console.log(chalk.yellow("Initiating shutdown sequence..."));
 
+  if (edgeSocket) edgeSocket.close();
   if (server) {
     server.close(() => {
       console.log(chalk.green("✅ Port 9000 released successfully."));
     });
   }
-
-  if (process.platform !== "darwin") {
-    electronApp.quit();
-  }
+  if (process.platform !== "darwin") electronApp.quit();
 });
 
 electronApp.on("before-quit", () => {
-  if (server) {
-    server.close();
-  }
+  if (edgeSocket) edgeSocket.close();
+  if (server) server.close();
 });
