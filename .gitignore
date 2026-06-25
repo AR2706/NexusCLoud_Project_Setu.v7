@@ -7,3 +7,6 @@ dashboard/public/win-unpacked/
 dashboard/public/linux-unpacked/
 dashboard/public/mac/
 dashboard/public/gui-*
+node_modules/
+provider-cli/node_modules/
+dashboard/node_modules/
