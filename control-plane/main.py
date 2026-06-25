@@ -105,8 +105,9 @@ async def deploy_workload(req: DeployRequest):
         provider_ws = manager.providers[region][0] # Grab the first available node in the region
         
         try:
+            # In main.py, inside @app.post("/api/v1/deploy")
             await provider_ws.send_json({
-                "command": "DEPLOY_WORKLOAD",
+                "command": "DEPLOY_WORKLOAD",  # <--- THIS IS THE KEY YOUR FRONTEND IS LOOKING FOR
                 "github_url": req.github_url,
                 "limits": req.limits,
                 "containerId": deployment_id,
@@ -155,8 +156,18 @@ async def provider_ws(websocket: WebSocket, token: str, region: str):
                 # Optional: Update node capacity in MongoDB
             
             # 🔥 BRIDGE LOGS: Route logs from Electron -> Control Plane -> Vercel UI
+            # 🔥 BRIDGE LOGS: Route logs from Electron -> Control Plane -> Vercel UI
             elif data.get("type") == "BUILD_LOG":
-                await manager.send_log_to_client(data["containerId"], data["log"])
+                container_id = data.get("containerId")
+                log_content = data.get("log")
+                
+                # Debug print to see if backend is even receiving the log
+                print(f"DEBUG: Routing log for {container_id} to client") 
+                
+                if container_id in manager.clients:
+                    await manager.clients[container_id].send_text(log_content)
+                else:
+                    print(f"DEBUG: Client {container_id} not found in manager.clients!")
                 
     except WebSocketDisconnect:
         print(f"⚠️ Edge Node dropped from Region: [{region.upper()}]")
