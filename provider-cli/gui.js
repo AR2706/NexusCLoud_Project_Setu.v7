@@ -6,8 +6,6 @@ const os = require("os");
 const { exec } = require("child_process");
 const path = require("path");
 const { WebSocket } = require("ws");
-
-// 🔥 FIX: Import the Docker Engine logic you wrote!
 const { deployWorkload, teardownWorkload } = require("./docker-engine");
 
 // ==========================================
@@ -18,7 +16,6 @@ class HighAvailabilityWatcher {
     this.primaryIp = primaryIp;
     this.staticNgrokDomain = staticNgrokDomain;
     this.targetPort = targetPort;
-
     this.failCount = 0;
     this.maxFails = 3;
     this.checkInterval = 5000;
@@ -27,11 +24,6 @@ class HighAvailabilityWatcher {
 
   start() {
     console.log(chalk.cyan(`\n[HA-WATCHER] 🛡️ Active-Passive Failover Armed.`));
-    console.log(
-      chalk.gray(
-        `[HA-WATCHER] Monitoring Primary Node at ${this.primaryIp}...`,
-      ),
-    );
     setInterval(() => this.pingPrimary(), this.checkInterval);
   }
 
@@ -57,24 +49,14 @@ class HighAvailabilityWatcher {
     this.hasTakenOver = true;
     console.log(
       chalk.bgRed.white.bold(
-        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`,
+        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING FAILOVER...`,
       ),
     );
-    const ngrokCommand = `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`;
-    exec(ngrokCommand, (error) => {
-      if (error) {
-        console.error(
-          chalk.red(
-            `[HA-WATCHER] Failed to hijack Ngrok tunnel: ${error.message}`,
-          ),
-        );
-        this.hasTakenOver = false;
-      }
-    });
-    console.log(
-      chalk.green(
-        `[HA-WATCHER] ✅ Secondary Node successfully took control of ${this.staticNgrokDomain}!`,
-      ),
+    exec(
+      `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`,
+      (error) => {
+        if (error) this.hasTakenOver = false;
+      },
     );
   }
 }
@@ -89,12 +71,12 @@ let authToken = null;
 let activeRegion = null;
 let edgeSocket = null;
 
-// Point this to your Render URL for production!
+// Production Render URL
 let controlPlaneUrl = "https://nexuscloud-project-setu-v7.onrender.com";
 
-// 🔥 FIX: Native Edge Tunnel directly inside Electron
+// 🔥 NATIVE EDGE TUNNEL CONTROLLER
 function startEdgeTunnel(token, region) {
-  // Fix 1: Use the correct backend URL for providers!
+  // Fix: Matches the exact WebSocket route expected by main.py
   const wsUrl =
     controlPlaneUrl.replace(/^http/, "ws") + `/ws/provider/${token}/${region}`;
   console.log(
@@ -114,109 +96,56 @@ function startEdgeTunnel(token, region) {
   edgeSocket.on("message", async (data) => {
     try {
       const message = JSON.parse(data.toString());
-      console.log(
-        chalk.blue(`📦 Deployment Command Received:`),
-        message.command,
-      );
+      console.log(chalk.blue(`📦 Orchestration Event:`), message.command);
 
-      // Fix 3: Execute the Docker engine natively when commands come in
+      // Define how to stream logs back to the Python backend
+      const streamLogToCloud = (msg) => {
+        if (edgeSocket && edgeSocket.readyState === WebSocket.OPEN) {
+          edgeSocket.send(
+            JSON.stringify({
+              type: "BUILD_LOG",
+              containerId: message.containerId,
+              log: msg,
+            }),
+          );
+        }
+      };
+
       if (message.command === "DEPLOY_WORKLOAD") {
-        console.log(
-          chalk.cyan(
-            `🚀 Provisioning target repo: ${message.github_url} on port ${message.targetPort}`,
-          ),
-        );
-
-        // Callback function to stream logs back to the Cloud
-        const streamToCloud = (logText) => {
-          if (edgeSocket && edgeSocket.readyState === WebSocket.OPEN) {
-            edgeSocket.send(
-              JSON.stringify({
-                type: "BUILD_LOG",
-                containerId: message.containerId,
-                log: logText,
-              }),
-            );
-          }
-        };
-
-        // Fire the actual Docker engine!
         await deployWorkload(
           message.github_url,
           message.limits,
           message.containerId,
           message.targetPort,
-          streamToCloud,
+          streamLogToCloud,
         );
       } else if (message.command === "STOP_WORKLOAD") {
-        console.log(
-          chalk.yellow(`🛑 Terminating workload: ${message.containerId}`),
-        );
-
-        const streamToCloud = (logText) => {
-          if (edgeSocket && edgeSocket.readyState === WebSocket.OPEN) {
-            edgeSocket.send(
-              JSON.stringify({
-                type: "BUILD_LOG",
-                containerId: message.containerId,
-                log: logText,
-              }),
-            );
-          }
-        };
-
-        // Fire the actual Teardown engine!
-        await teardownWorkload(message.containerId, streamToCloud);
+        await teardownWorkload(message.containerId, streamLogToCloud);
       }
     } catch (err) {
-      console.error(
-        chalk.red(
-          "⚠️ Failed to parse inbound orchestration frame:",
-          err.message,
-        ),
-      );
+      console.error(chalk.red("⚠️ Parse error:"), err.message);
     }
   });
 
   edgeSocket.on("close", (code) => {
-    console.warn(
-      chalk.yellow(
-        `⚠️ Tunnel disconnected (Code: ${code}). Reconnecting in 5 seconds...`,
-      ),
-    );
+    console.warn(chalk.yellow(`⚠️ Tunnel disconnected. Retrying in 5s...`));
     setTimeout(() => {
       if (authToken) startEdgeTunnel(token, region);
     }, 5000);
   });
-
-  edgeSocket.on("error", (error) => {
-    console.error(
-      chalk.red("❌ Tunnel socket exception error:", error.message),
-    );
-  });
 }
 
 // --- API ROUTES FOR THE DESKTOP UI ---
-
 app.post("/api/register", async (req, res) => {
   try {
     const response = await axios.post(
       `${controlPlaneUrl}/api/v1/auth/register`,
-      {
-        email: req.body.email,
-        password: req.body.password,
-        region: req.body.region,
-      },
+      req.body,
     );
-
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-      console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
-
-      // 🔥 FIX 4: Just start the tunnel natively instead of forking
       startEdgeTunnel(authToken, activeRegion);
-
       res.json({ success: true, region: activeRegion });
     } else {
       res.status(400).json({ success: false, error: response.data.error });
@@ -232,23 +161,12 @@ app.post("/api/login", async (req, res) => {
   try {
     const response = await axios.post(
       `${controlPlaneUrl}/api/v1/auth/provider`,
-      {
-        email: req.body.email,
-        password: req.body.password,
-        region: req.body.region,
-      },
+      req.body,
     );
-
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-      console.log(
-        chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
-      );
-
-      // 🔥 FIX 4: Just start the tunnel natively instead of forking
       startEdgeTunnel(authToken, activeRegion);
-
       res.json({ success: true, region: activeRegion });
     } else {
       res.status(401).json({ success: false, error: response.data.error });
@@ -341,7 +259,7 @@ app.get("/", (req, res) => {
 
             function toggleMode() {
                 currentMode = currentMode === 'login' ? 'register' : 'login';
-                document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate your Edge Node' : 'Register your Edge Node';
+                document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate' : 'Register';
                 document.getElementById('submit-btn').textContent = currentMode === 'login' ? 'Connect to Grid' : 'Create Account';
                 document.getElementById('submit-btn').setAttribute('onclick', \`authenticate('\${currentMode}')\`);
                 document.getElementById('toggle-text').textContent = currentMode === 'login' ? "Don't have an account?" : "Already registered?";
@@ -411,12 +329,8 @@ function createWindow() {
     height: 700,
     title: "Nexus Provider Engine",
     autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
+    webPreferences: { nodeIntegration: true, contextIsolation: false },
   });
-
   mainWindow.loadURL(`http://localhost:${GUI_PORT}`);
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -426,22 +340,6 @@ function createWindow() {
 electronApp.whenReady().then(() => {
   server = app.listen(GUI_PORT, () => {
     console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
-
-    const args = process.argv;
-    const backupIndex = args.indexOf("--backup");
-
-    if (backupIndex !== -1 && args[backupIndex + 1] && args[backupIndex + 2]) {
-      const primaryIp = args[backupIndex + 1];
-      const ngrokDomain = args[backupIndex + 2];
-      const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
-      watcher.start();
-    } else {
-      console.log(
-        chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
-      );
-    }
-
-    console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
     createWindow();
   });
 
@@ -450,16 +348,9 @@ electronApp.whenReady().then(() => {
   });
 });
 
-// 🛑 GRACEFUL SHUTDOWN
 electronApp.on("window-all-closed", () => {
-  console.log(chalk.yellow("Initiating shutdown sequence..."));
-
   if (edgeSocket) edgeSocket.close();
-  if (server) {
-    server.close(() => {
-      console.log(chalk.green("✅ Port 9000 released successfully."));
-    });
-  }
+  if (server) server.close();
   if (process.platform !== "darwin") electronApp.quit();
 });
 

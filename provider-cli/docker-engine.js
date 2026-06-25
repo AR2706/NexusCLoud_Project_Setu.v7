@@ -6,17 +6,21 @@ const fs = require('fs');
 const os = require('os');
 const chalk = require('chalk');
 
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+// By passing empty options, dockerode automatically detects /var/run/docker.sock on Linux/Mac 
+// or //./pipe/docker_engine on Windows. It is the most robust cross-platform approach.
+const docker = new Docker();
+const isWin = process.platform === 'win32';
 
 const activeTunnels = new Map(); 
-
-// Helper function to pause execution
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function establishPublicTunnel(localPort) {
     return new Promise((resolve, reject) => {
         console.log(chalk.gray(`   ├─ Negotiating Zero-Trust HTTPS Tunnel with Cloudflare...`));
-        const tunnelProcess = spawn('cloudflared', ['tunnel', '--url', `http://127.0.0.1:${localPort}`]);
+        
+        // Windows needs .exe and shell:true for global system commands
+        const cmd = isWin ? 'cloudflared.exe' : 'cloudflared';
+        const tunnelProcess = spawn(cmd, ['tunnel', '--url', `http://127.0.0.1:${localPort}`], { shell: isWin });
 
         tunnelProcess.stderr.on('data', (data) => {
             const output = data.toString();
@@ -26,8 +30,8 @@ function establishPublicTunnel(localPort) {
             }
         });
 
-        tunnelProcess.on('close', (code) => {
-            if (code !== 0) console.log(chalk.red(`   ├─ Cloudflare daemon exited unexpectedly (Code: ${code})`));
+        tunnelProcess.on('error', (err) => {
+            console.log(chalk.red(`   ├─ Cloudflare Error: ${err.message}. Is cloudflared installed?`));
         });
 
         setTimeout(() => reject(new Error("Cloudflare tunnel handshake timed out.")), 15000);
@@ -44,8 +48,7 @@ async function deployWorkload(githubUrl, limits, containerId, targetPort, onLog)
 
     try {
         console.log(chalk.cyan(`\n🐳 [Docker Engine] Initiating pipeline for ${deploymentId}...`));
-        streamLog(`Initiating pipeline for ${deploymentId}...\n`);
-        streamLog(`Cloning repository: ${githubUrl}\n`);
+        streamLog(`Initiating pipeline for ${deploymentId}...\nCloning repository: ${githubUrl}\n`);
         
         await simpleGit().clone(githubUrl, cloneDir);
 
@@ -55,16 +58,17 @@ async function deployWorkload(githubUrl, limits, containerId, targetPort, onLog)
 
         streamLog(`Compiling Docker image natively...\n`);
         await new Promise((resolve, reject) => {
+            // Fix: Added shell: true for Windows to prevent ENOENT crashes when running Docker CLI
             const buildProcess = spawn('docker', ['build', '-t', deploymentId, '.'], {
                 cwd: cloneDir,
-                env: { ...process.env, DOCKER_BUILDKIT: '1' } 
+                env: { ...process.env, DOCKER_BUILDKIT: '1' },
+                shell: isWin 
             });
 
-            // Stream logs directly up to the React UI
             buildProcess.stdout.on('data', streamLog);
             buildProcess.stderr.on('data', streamLog);
-
             buildProcess.on('close', (code) => code === 0 ? resolve() : reject(new Error(`Docker build failed.`)));
+            buildProcess.on('error', () => reject(new Error('Docker is not running or not installed.')));
         });
 
         streamLog(`Provisioning sandbox: ${limits.maxCpu} vCPU, ${limits.maxRamMb}MB RAM\n`);
@@ -81,9 +85,7 @@ async function deployWorkload(githubUrl, limits, containerId, targetPort, onLog)
         });
         await container.start();
         
-        // Wait for the container's internal web server to wake up
         streamLog(`Waiting for container services to boot up (3s)...\n`);
-        console.log(chalk.gray(`   ├─ Pausing 3 seconds for container boot...`));
         await sleep(3000); 
 
         streamLog(`Negotiating secure HTTPS tunnel on port ${targetPort}...\n`);
@@ -91,13 +93,12 @@ async function deployWorkload(githubUrl, limits, containerId, targetPort, onLog)
 
         activeTunnels.set(deploymentId, tunnel.processId);
         
-        // Output both Local and Public URLs
         streamLog(`\n✅ WORKLOAD LIVE!\nLOCAL URL: http://localhost:${hostPort}\nPUBLIC URL: ${tunnel.publicUrl}\n`);
         console.log(chalk.green(`   ├─ 🏠 Local Preview: http://localhost:${hostPort}`));
         console.log(chalk.green(`   └─ 🌐 Public URL: ${tunnel.publicUrl}`));
 
         fs.rmSync(cloneDir, { recursive: true, force: true });
-        return { success: true, localPort: hostPort, containerId: deploymentId, publicUrl: tunnel.publicUrl };
+        return { success: true };
 
     } catch (error) {
         streamLog(`\n❌ Pipeline Failure: ${error.message}\n`);
@@ -109,13 +110,10 @@ async function deployWorkload(githubUrl, limits, containerId, targetPort, onLog)
 
 async function teardownWorkload(containerId, onLog) {
     const streamLog = (msg) => { if (onLog) onLog(msg.toString()); };
-    
     console.log(chalk.yellow(`\n🗑️ [Docker Engine] Initiating Teardown Sequence for ${containerId}...`));
-    streamLog(`\n[System] Initiating Teardown Sequence for ${containerId}...\n`);
 
     try {
         const container = docker.getContainer(containerId);
-        
         streamLog(`Stopping container sandbox...\n`);
         await container.stop(); 
         
@@ -129,13 +127,11 @@ async function teardownWorkload(containerId, onLog) {
             activeTunnels.delete(containerId); 
         }
 
-        console.log(chalk.green(`   └─ ✅ Workload Eradicated!`));
         streamLog(`✅ Workload Eradicated! Ports and memory released.\n`);
         return { success: true };
     } catch (error) {
-        console.log(chalk.red(`   └─ ❌ Teardown Failure: ${error.message}`));
         streamLog(`❌ Teardown Failure: ${error.message}\n`);
-        return { success: false, error: error.message };
+        return { success: false };
     }
 }
 
