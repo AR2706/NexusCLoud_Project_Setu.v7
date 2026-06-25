@@ -12,7 +12,6 @@ const os = require("os");
 const chalk = require("chalk");
 
 // 1. Cross-Platform Docker Connection
-// Automatically switches between Windows Named Pipe and Unix Socket
 const isWin = process.platform === "win32";
 const docker = new Docker(
   isWin
@@ -32,12 +31,12 @@ function establishPublicTunnel(localPort) {
       ),
     );
 
-    // Windows requires '.exe' extension and shell:true to execute from PATH
     const cmd = isWin ? "cloudflared.exe" : "cloudflared";
+    // shell: true is enforced universally to ensure system PATH inheritance
     const tunnelProcess = spawn(
       cmd,
       ["tunnel", "--url", `http://127.0.0.1:${localPort}`],
-      { shell: isWin },
+      { shell: true },
     );
 
     tunnelProcess.stderr.on("data", (data) => {
@@ -53,7 +52,7 @@ function establishPublicTunnel(localPort) {
     tunnelProcess.on("error", (err) => {
       console.log(
         chalk.red(
-          `   ├─ Cloudflare Error: ${err.message}. Ensure cloudflared is in your system PATH.`,
+          `   ├─ Cloudflare Error: ${err.message}. Is cloudflared installed?`,
         ),
       );
     });
@@ -83,11 +82,14 @@ async function deployWorkload(
   };
 
   try {
+    // 🔥 THE FIX: 2.5 second buffer to allow Vercel Dashboard UI to connect its listener
+    await sleep(2500);
+
     console.log(
       chalk.cyan(`\n🐳 [Docker Engine] Pipeline start: ${deploymentId}...`),
     );
     streamLog(
-      `Initiating pipeline for ${deploymentId}...\nCloning: ${githubUrl}\n`,
+      `Initiating pipeline for ${deploymentId}...\nCloning repository: ${githubUrl}\n`,
     );
 
     await simpleGit().clone(githubUrl, cloneDir);
@@ -98,11 +100,11 @@ async function deployWorkload(
 
     streamLog(`Compiling Docker image natively...\n`);
     await new Promise((resolve, reject) => {
-      // Critical: shell: isWin enables CMD/PowerShell execution on Windows
+      // 🔥 THE FIX: shell: true forces Electron to inherit system PATH for Docker
       const buildProcess = spawn("docker", ["build", "-t", deploymentId, "."], {
         cwd: cloneDir,
         env: { ...process.env, DOCKER_BUILDKIT: "1" },
-        shell: isWin,
+        shell: true,
       });
 
       buildProcess.stdout.on("data", streamLog);
