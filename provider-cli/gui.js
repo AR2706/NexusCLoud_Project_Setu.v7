@@ -3,7 +3,7 @@ const express = require("express");
 const axios = require("axios");
 const chalk = require("chalk");
 const os = require("os");
-const { spawn, exec } = require("child_process");
+const { spawn, exec, fork } = require("child_process");
 const path = require("path");
 
 // ==========================================
@@ -115,9 +115,10 @@ app.post("/api/register", async (req, res) => {
       activeRegion = req.body.region || "global";
 
       console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
-      spawn("node", ["index.js", authToken, activeRegion], {
-        stdio: "inherit",
-      });
+
+      // 🔥 FIX: Use Electron's native fork to read inside the .asar archive
+      fork(path.join(__dirname, "index.js"), [authToken, activeRegion]);
+
       res.json({ success: true, region: activeRegion });
     } else {
       res.status(400).json({ success: false, error: response.data.error });
@@ -147,9 +148,10 @@ app.post("/api/login", async (req, res) => {
       console.log(
         chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
       );
-      spawn("node", ["index.js", authToken, activeRegion], {
-        stdio: "inherit",
-      });
+
+      // 🔥 FIX: Use Electron's native fork to read inside the .asar archive
+      fork(path.join(__dirname, "index.js"), [authToken, activeRegion]);
+
       res.json({ success: true, region: activeRegion });
     } else {
       res.status(401).json({ success: false, error: response.data.error });
