@@ -23,9 +23,19 @@ app.add_middleware(
 # ==========================================
 # 🗄️ DATABASE INITIALIZATION (MongoDB Atlas)
 # ==========================================
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
-db = client.nexus_db # Update this to your actual database name if different
+db = client.nexus_db 
+users_collection = db.users
+
+# Add this test route to check if the DB is reachable
+@app.get("/debug/db")
+async def debug_db():
+    try:
+        count = await users_collection.count_documents({})
+        return {"status": "connected", "user_count": count}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 # ==========================================
 # 📡 STATE & CONNECTION MANAGER
