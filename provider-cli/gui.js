@@ -7,7 +7,6 @@ const path = require("path");
 const fs = require("fs");
 const Docker = require("dockerode");
 const WebSocket = require("ws");
-const { io } = require("socket.io-client");
 const { exec, spawn } = require("child_process");
 
 // ==========================================
@@ -20,45 +19,47 @@ const dockerSocket =
 const docker = new Docker({ socketPath: dockerSocket });
 
 // ==========================================
-// 2. SESSION & TUNNEL LOGIC (Replaces index.js)
+// 2. SESSION & TUNNEL LOGIC
 // ==========================================
 let authToken = null;
 let activeRegion = null;
 let wsClient = null;
 const sessionFilePath = path.join(os.homedir(), ".nexus_session.json");
 
-// This function replaces your fork('index.js') call. It runs in the main memory!
 function initializeEdgeNode(token, region) {
-  console.log(chalk.cyan(`\n[EDGE-NODE] Initializing Socket.io tunnel...`));
+  console.log(
+    chalk.cyan(`\n[EDGE-NODE] Initializing worker in main process...`),
+  );
 
-  if (socket) socket.disconnect();
+  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+    wsClient.close();
+  }
 
-  socket = io("https://nexuscloud-project-setu-v7.onrender.com", {
-    path: "/tunnel",
-    auth: { token: token },
-    extraHeaders: {
-      Origin: "https://nexuscloud-project-setu-v7.onrender.com",
-    },
+  // 🔥 FIX: Corrected the URL to match the FastAPI backend route exactly
+  const wsUrl = `wss://nexuscloud-project-setu-v7.onrender.com/ws/provider/${token}/${region}`;
+  wsClient = new WebSocket(wsUrl);
+
+  wsClient.on("open", () => {
+    console.log(chalk.green("[WS] Tunnel Connected to Control Plane"));
+
+    const capacityPayload = {
+      action: "register_capacity",
+      region: activeRegion,
+      cores: os.cpus().length,
+      ram: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
+    };
+
+    wsClient.send(JSON.stringify(capacityPayload));
   });
 
-  socket.on("connect", () => {
-    console.log(chalk.green("[WS] Connected via Socket.io!"));
-
-    // Announce capacity
-    socket.emit(
-      "message",
-      JSON.stringify({
-        action: "register_capacity",
-        region: region,
-        cores: os.cpus().length,
-        ram: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
-      }),
-    );
-  });
-
-  socket.on("connect_error", (err) => {
-    console.error(chalk.red(`[WS] Connection Error: ${err.message}`));
-  });
+  wsClient.on("close", (code, reason) =>
+    console.log(
+      chalk.yellow(`[WS] Tunnel Closed. Code: ${code}, Reason: ${reason}`),
+    ),
+  );
+  wsClient.on("error", (err) =>
+    console.error(chalk.red(`[WS] CRITICAL ERROR:`), err.message),
+  );
 }
 
 // ==========================================
@@ -106,7 +107,6 @@ class HighAvailabilityWatcher {
       ),
     );
 
-    // Using shell: true to fix process path resolution issues in .asar
     const ngrokProcess = spawn(
       "ngrok",
       ["http", this.targetPort, `--domain=${this.staticNgrokDomain}`],
@@ -144,7 +144,6 @@ app.post("/api/register", async (req, res) => {
       activeRegion = req.body.region || "global";
       console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
 
-      // Call function directly instead of fork()
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
@@ -170,7 +169,6 @@ app.post("/api/login", async (req, res) => {
         chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
       );
 
-      // Call function directly instead of fork()
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
@@ -193,125 +191,131 @@ app.get("/api/status", (req, res) => {
   });
 });
 
-// DESKTOP UI INJECTED VIA EXPRESS
 app.get("/", (req, res) => {
   res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Nexus Provider Engine</title>
-<script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-900 text-white h-screen flex items-center justify-center font-sans">
-<div id="login-view" class="bg-gray-800 p-8 rounded-xl shadow-2xl w-96 border border-gray-700">
-<h1 id="form-title" class="text-2xl font-bold mb-2 flex items-center"><span class="text-blue-500 mr-2">⚡</span> Nexus Desktop</h1>
-<p id="form-subtitle" class="text-gray-400 text-sm mb-6">Authenticate your Edge Node</p>
-<input type="email" id="email" placeholder="Email" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-4 text-white outline-none focus:border-blue-500">
-<input type="password" id="password" placeholder="Password" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-4 text-white outline-none focus:border-blue-500">
-<select id="region" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-6 text-white outline-none focus:border-blue-500 appearance-none">
-<option value="in-mum">📍 Asia South (Mumbai)</option>
-<option value="us-east">📍 US East (N. Virginia)</option>
-<option value="eu-west">📍 Europe West (Frankfurt)</option>
-<option value="global">🌐 Global Edge Anycast</option>
-</select>
-<button id="submit-btn" onclick="authenticate('login')" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition-colors mb-4">
-Connect to Grid
-</button>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Nexus Provider Engine</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-gray-900 text-white h-screen flex items-center justify-center font-sans">
+        
+        <div id="login-view" class="bg-gray-800 p-8 rounded-xl shadow-2xl w-96 border border-gray-700">
+            <h1 id="form-title" class="text-2xl font-bold mb-2 flex items-center"><span class="text-blue-500 mr-2">⚡</span> Nexus Desktop</h1>
+            <p id="form-subtitle" class="text-gray-400 text-sm mb-6">Authenticate your Edge Node</p>
+            
+            <input type="email" id="email" placeholder="Email" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-4 text-white outline-none focus:border-blue-500">
+            <input type="password" id="password" placeholder="Password" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-4 text-white outline-none focus:border-blue-500">
+            
+            <select id="region" class="w-full bg-gray-900 border border-gray-700 rounded p-3 mb-6 text-white outline-none focus:border-blue-500 appearance-none">
+                <option value="in-mum">📍 Asia South (Mumbai)</option>
+                <option value="us-east">📍 US East (N. Virginia)</option>
+                <option value="eu-west">📍 Europe West (Frankfurt)</option>
+                <option value="global">🌐 Global Edge Anycast</option>
+            </select>
+            
+            <button id="submit-btn" onclick="authenticate('login')" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition-colors mb-4">
+                Connect to Grid
+            </button>
 
-<div class="text-center text-sm">
-<span id="toggle-text" class="text-gray-400">Don't have an account?</span>
-<button onclick="toggleMode()" id="toggle-btn" class="text-blue-400 font-bold hover:underline ml-1">Register</button>
-</div>
+            <div class="text-center text-sm">
+                <span id="toggle-text" class="text-gray-400">Don't have an account?</span>
+                <button onclick="toggleMode()" id="toggle-btn" class="text-blue-400 font-bold hover:underline ml-1">Register</button>
+            </div>
 
-<p id="error-msg" class="text-red-400 text-sm mt-4 text-center hidden"></p>
-</div>
+            <p id="error-msg" class="text-red-400 text-sm mt-4 text-center hidden"></p>
+        </div>
 
-<div id="dashboard-view" class="hidden bg-gray-800 p-8 rounded-xl shadow-2xl w-[650px] border border-gray-700">
-<div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
-<h1 class="text-2xl font-bold text-white flex items-center"><span class="text-green-500 mr-2">●</span> Engine Active</h1>
-<span class="bg-blue-900 text-blue-300 text-xs px-3 py-1 rounded-full border border-blue-700">Authenticated</span>
-</div>
-<div class="grid grid-cols-3 gap-4 mb-6">
-<div class="bg-gray-900 p-4 rounded border border-gray-700">
-<p class="text-gray-400 text-xs uppercase tracking-wider mb-1">Territory</p>
-<p class="text-xl font-mono text-blue-400" id="stat-region">--</p>
-</div>
-<div class="bg-gray-900 p-4 rounded border border-gray-700">
-<p class="text-gray-400 text-xs uppercase tracking-wider mb-1">Compute Cores</p>
-<p class="text-xl font-mono" id="stat-cores">--</p>
-</div>
-<div class="bg-gray-900 p-4 rounded border border-gray-700">
-<p class="text-gray-400 text-xs uppercase tracking-wider mb-1">System Memory</p>
-<p class="text-xl font-mono" id="stat-ram">-- GB</p>
-</div>
-</div>
+        <div id="dashboard-view" class="hidden bg-gray-800 p-8 rounded-xl shadow-2xl w-[650px] border border-gray-700">
+            <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                <h1 class="text-2xl font-bold text-white flex items-center"><span class="text-green-500 mr-2">●</span> Engine Active</h1>
+                <span class="bg-blue-900 text-blue-300 text-xs px-3 py-1 rounded-full border border-blue-700">Authenticated</span>
+            </div>
+            
+            <div class="grid grid-cols-3 gap-4 mb-6">
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-gray-400 text-xs uppercase tracking-wider mb-1">Territory</p>
+                    <p class="text-xl font-mono text-blue-400" id="stat-region">--</p>
+                </div>
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-gray-400 text-xs uppercase tracking-wider mb-1">Compute Cores</p>
+                    <p class="text-xl font-mono" id="stat-cores">--</p>
+                </div>
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-gray-400 text-xs uppercase tracking-wider mb-1">System Memory</p>
+                    <p class="text-xl font-mono" id="stat-ram">-- GB</p>
+                </div>
+            </div>
 
-<div class="bg-black p-4 rounded border border-gray-700 font-mono text-sm text-green-400 h-32 overflow-y-auto">
-> Initializing secure connection...<br>
-> Synchronizing regional ledger...<br>
-> Awaiting central brain instructions...<br>
-</div>
-</div>
+            <div class="bg-black p-4 rounded border border-gray-700 font-mono text-sm text-green-400 h-32 overflow-y-auto">
+                > Initializing secure connection...<br>
+                > Synchronizing regional ledger...<br>
+                > Awaiting central brain instructions...<br>
+            </div>
+        </div>
 
-<script>
-let currentMode = 'login';
+        <script>
+            let currentMode = 'login';
 
-function toggleMode() {
-currentMode = currentMode === 'login' ? 'register' : 'login';
-document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate your Edge Node' : 'Register your Edge Node';
-document.getElementById('submit-btn').textContent = currentMode === 'login' ? 'Connect to Grid' : 'Create Account';
-document.getElementById('submit-btn').setAttribute('onclick', \`authenticate('\${currentMode}')\`);
-document.getElementById('toggle-text').textContent = currentMode === 'login' ? "Don't have an account?" : "Already registered?";
-document.getElementById('toggle-btn').textContent = currentMode === 'login' ? "Register" : "Log In";
-document.getElementById('error-msg').classList.add('hidden');
-}
+            function toggleMode() {
+                currentMode = currentMode === 'login' ? 'register' : 'login';
+                document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate your Edge Node' : 'Register your Edge Node';
+                document.getElementById('submit-btn').textContent = currentMode === 'login' ? 'Connect to Grid' : 'Create Account';
+                document.getElementById('submit-btn').setAttribute('onclick', \`authenticate('\${currentMode}')\`);
+                document.getElementById('toggle-text').textContent = currentMode === 'login' ? "Don't have an account?" : "Already registered?";
+                document.getElementById('toggle-btn').textContent = currentMode === 'login' ? "Register" : "Log In";
+                document.getElementById('error-msg').classList.add('hidden');
+            }
 
-async function authenticate(mode) {
-const email = document.getElementById('email').value;
-const password = document.getElementById('password').value;
-const region = document.getElementById('region').value;
-const errorMsg = document.getElementById('error-msg');
-const btn = document.getElementById('submit-btn');
-btn.disabled = true;
-btn.textContent = 'Processing...';
+            async function authenticate(mode) {
+                const email = document.getElementById('email').value;
+                const password = document.getElementById('password').value;
+                const region = document.getElementById('region').value;
+                const errorMsg = document.getElementById('error-msg');
+                const btn = document.getElementById('submit-btn');
+                
+                btn.disabled = true;
+                btn.textContent = 'Processing...';
 
-try {
-const endpoint = mode === 'register' ? '/api/register' : '/api/login';
-const res = await fetch(endpoint, {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ email, password, region })
-});
-const data = await res.json();
-if (data.success) {
-document.getElementById('login-view').classList.add('hidden');
-document.getElementById('dashboard-view').classList.remove('hidden');
-loadStats();
-} else {
-errorMsg.textContent = data.error;
-errorMsg.classList.remove('hidden');
-}
-} catch(e) {
-errorMsg.textContent = "Network Error.";
-errorMsg.classList.remove('hidden');
-} finally {
-btn.disabled = false;
-btn.textContent = mode === 'login' ? 'Connect to Grid' : 'Create Account';
-}
-}
+                try {
+                    const endpoint = mode === 'register' ? '/api/register' : '/api/login';
+                    const res = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password, region })
+                    });
+                    
+                    const data = await res.json();
+                    if (data.success) {
+                        document.getElementById('login-view').classList.add('hidden');
+                        document.getElementById('dashboard-view').classList.remove('hidden');
+                        loadStats();
+                    } else {
+                        errorMsg.textContent = data.error;
+                        errorMsg.classList.remove('hidden');
+                    }
+                } catch(e) {
+                    errorMsg.textContent = "Network Error.";
+                    errorMsg.classList.remove('hidden');
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = mode === 'login' ? 'Connect to Grid' : 'Create Account';
+                }
+            }
 
-async function loadStats() {
-const res = await fetch('/api/status');
-const data = await res.json();
-document.getElementById('stat-cores').textContent = data.cores;
-document.getElementById('stat-ram').textContent = data.ram + " GB";
-document.getElementById('stat-region').textContent = data.region.toUpperCase();
-}
-</script>
-</body>
-</html>
-`);
+            async function loadStats() {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                document.getElementById('stat-cores').textContent = data.cores;
+                document.getElementById('stat-ram').textContent = data.ram + " GB";
+                document.getElementById('stat-region').textContent = data.region.toUpperCase();
+            }
+        </script>
+    </body>
+    </html>
+  `);
 });
 
 // ==========================================
@@ -343,7 +347,7 @@ function createWindow() {
 electronApp.whenReady().then(() => {
   server = app
     .listen(GUI_PORT, () => {
-      console.log(chalk.bgBlue.white.bold(`\n 🖥️ Nexus Desktop UI Active `));
+      console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
 
       const args = process.argv;
       const backupIndex = args.indexOf("--backup");
@@ -359,11 +363,11 @@ electronApp.whenReady().then(() => {
         watcher.start();
       } else {
         console.log(
-          chalk.gray(` └─ Running as Primary Node (HA Watcher Disabled)`),
+          chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
         );
       }
 
-      console.log(chalk.cyan(` └─ Launching Native Desktop Interface...\n`));
+      console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
       createWindow();
     })
     .on("error", (err) => {

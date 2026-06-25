@@ -10,3 +10,6 @@ dashboard/public/gui-*
 node_modules/
 provider-cli/node_modules/
 dashboard/node_modules/
+provider-cli/node_modules/
+dashboard/node_modules/
+dist/
