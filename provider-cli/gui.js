@@ -12,9 +12,10 @@ const { exec, spawn } = require("child_process");
 // ==========================================
 // 1. CROSS-PLATFORM DOCKER SETUP
 // ==========================================
-const dockerSocket = process.platform === 'win32' 
-    ? '//./pipe/docker_engine' 
-    : '/var/run/docker.sock';
+const dockerSocket =
+  process.platform === "win32"
+    ? "//./pipe/docker_engine"
+    : "/var/run/docker.sock";
 const docker = new Docker({ socketPath: dockerSocket });
 
 // ==========================================
@@ -23,22 +24,36 @@ const docker = new Docker({ socketPath: dockerSocket });
 let authToken = null;
 let activeRegion = null;
 let wsClient = null;
-const sessionFilePath = path.join(os.homedir(), '.nexus_session.json');
+const sessionFilePath = path.join(os.homedir(), ".nexus_session.json");
 
 // This function replaces your fork('index.js') call. It runs in the main memory!
 function initializeEdgeNode(token, region) {
-    console.log(chalk.cyan(`\n[EDGE-NODE] Initializing worker in main process...`));
-    
-    if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-        wsClient.close();
-    }
+  console.log(
+    chalk.cyan(`\n[EDGE-NODE] Initializing worker in main process...`),
+  );
 
-    wsClient = new WebSocket('wss://api.yourcontrolplane.com/tunnel', {
-        headers: { Authorization: `Bearer ${token}` }
-    });
+  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+    wsClient.close();
+  }
 
-    wsClient.on('open', () => console.log(chalk.green('[WS] Tunnel Connected')));
-    wsClient.on('close', () => console.log(chalk.yellow('[WS] Tunnel Closed')));
+  wsClient = new WebSocket("wss://api.yourcontrolplane.com/tunnel", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  wsClient.on("open", () => {
+    console.log(chalk.green("[WS] Tunnel Connected to Control Plane"));
+
+    // Announce capacity to the central brain so it becomes available on the dashboard
+    const capacityPayload = {
+      action: "register_capacity",
+      region: activeRegion,
+      cores: os.cpus().length,
+      ram: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
+    };
+
+    wsClient.send(JSON.stringify(capacityPayload));
+  });
+  wsClient.on("close", () => console.log(chalk.yellow("[WS] Tunnel Closed")));
 }
 
 // ==========================================
@@ -63,28 +78,44 @@ class HighAvailabilityWatcher {
   async pingPrimary() {
     if (this.hasTakenOver) return;
     try {
-      await axios.get(`http://${this.primaryIp}:9000/api/status`, { timeout: 3000 });
+      await axios.get(`http://${this.primaryIp}:9000/api/status`, {
+        timeout: 3000,
+      });
       this.failCount = 0;
     } catch (error) {
       this.failCount++;
-      console.log(chalk.yellow(`[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`));
+      console.log(
+        chalk.yellow(
+          `[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`,
+        ),
+      );
       if (this.failCount >= this.maxFails) this.triggerFailover();
     }
   }
 
   triggerFailover() {
     this.hasTakenOver = true;
-    console.log(chalk.bgRed.white.bold(`\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`));
-    
-    // Using shell: true to fix process path resolution issues
-    const ngrokProcess = spawn('ngrok', ['http', this.targetPort, `--domain=${this.staticNgrokDomain}`], {
-        shell: true, 
-        env: process.env
-    });
+    console.log(
+      chalk.bgRed.white.bold(
+        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`,
+      ),
+    );
 
-    ngrokProcess.on('error', (err) => {
-        console.error(chalk.red(`[HA-WATCHER] Failed to hijack Ngrok: ${err.message}`));
-        this.hasTakenOver = false;
+    // Using shell: true to fix process path resolution issues
+    const ngrokProcess = spawn(
+      "ngrok",
+      ["http", this.targetPort, `--domain=${this.staticNgrokDomain}`],
+      {
+        shell: true,
+        env: process.env,
+      },
+    );
+
+    ngrokProcess.on("error", (err) => {
+      console.error(
+        chalk.red(`[HA-WATCHER] Failed to hijack Ngrok: ${err.message}`),
+      );
+      this.hasTakenOver = false;
     });
   }
 }
@@ -99,12 +130,15 @@ let controlPlaneUrl = "https://nexuscloud-project-setu-v7.onrender.com";
 
 app.post("/api/register", async (req, res) => {
   try {
-    const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/register`, req.body);
+    const response = await axios.post(
+      `${controlPlaneUrl}/api/v1/auth/register`,
+      req.body,
+    );
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
       console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
-      
+
       // FIX: Call function directly instead of fork()
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
@@ -112,18 +146,25 @@ app.post("/api/register", async (req, res) => {
       res.status(400).json({ success: false, error: response.data.error });
     }
   } catch (err) {
-    res.status(500).json({ success: false, error: "Control Plane unreachable." });
+    res
+      .status(500)
+      .json({ success: false, error: "Control Plane unreachable." });
   }
 });
 
 app.post("/api/login", async (req, res) => {
   try {
-    const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/provider`, req.body);
+    const response = await axios.post(
+      `${controlPlaneUrl}/api/v1/auth/provider`,
+      req.body,
+    );
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-      console.log(chalk.green(`\n🔐 Authentication Successful! Token acquired.`));
-      
+      console.log(
+        chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
+      );
+
       // FIX: Call function directly instead of fork()
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
@@ -131,7 +172,9 @@ app.post("/api/login", async (req, res) => {
       res.status(401).json({ success: false, error: response.data.error });
     }
   } catch (err) {
-    res.status(500).json({ success: false, error: "Control Plane unreachable." });
+    res
+      .status(500)
+      .json({ success: false, error: "Control Plane unreachable." });
   }
 });
 
@@ -300,26 +343,39 @@ function createWindow() {
 }
 
 electronApp.whenReady().then(() => {
-  server = app.listen(GUI_PORT, () => {
-    console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
+  server = app
+    .listen(GUI_PORT, () => {
+      console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
 
-    const args = process.argv;
-    const backupIndex = args.indexOf("--backup");
+      const args = process.argv;
+      const backupIndex = args.indexOf("--backup");
 
-    if (backupIndex !== -1 && args[backupIndex + 1] && args[backupIndex + 2]) {
-      const primaryIp = args[backupIndex + 1];
-      const ngrokDomain = args[backupIndex + 2];
-      const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
-      watcher.start();
-    } else {
-      console.log(chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`));
-    }
+      if (
+        backupIndex !== -1 &&
+        args[backupIndex + 1] &&
+        args[backupIndex + 2]
+      ) {
+        const primaryIp = args[backupIndex + 1];
+        const ngrokDomain = args[backupIndex + 2];
+        const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
+        watcher.start();
+      } else {
+        console.log(
+          chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
+        );
+      }
 
-    console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
-    createWindow();
-  }).on('error', (err) => {
-      console.error(chalk.red(`Server failed to start on port ${GUI_PORT}. Is it already running?`), err.message);
-  });
+      console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
+      createWindow();
+    })
+    .on("error", (err) => {
+      console.error(
+        chalk.red(
+          `Server failed to start on port ${GUI_PORT}. Is it already running?`,
+        ),
+        err.message,
+      );
+    });
 
   electronApp.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -339,10 +395,10 @@ electronApp.on("window-all-closed", () => {
 electronApp.on("before-quit", () => {
   if (server) {
     server.close(() => {
-        console.log(chalk.green("✅ Express Port 9000 released cleanly."));
+      console.log(chalk.green("✅ Express Port 9000 released cleanly."));
     });
   }
   if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-      wsClient.close();
+    wsClient.close();
   }
 });
