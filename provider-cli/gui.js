@@ -3,167 +3,138 @@ const express = require("express");
 const axios = require("axios");
 const chalk = require("chalk");
 const os = require("os");
-const { spawn, exec, fork } = require("child_process");
 const path = require("path");
+const fs = require("fs");
+const Docker = require("dockerode");
+const WebSocket = require("ws");
+const { exec, spawn } = require("child_process");
 
 // ==========================================
-// 🛡️ HIGH AVAILABILITY (HA) FAILOVER MODULE
+// 1. CROSS-PLATFORM DOCKER SETUP
+// ==========================================
+const dockerSocket = process.platform === 'win32' 
+    ? '//./pipe/docker_engine' 
+    : '/var/run/docker.sock';
+const docker = new Docker({ socketPath: dockerSocket });
+
+// ==========================================
+// 2. SESSION & TUNNEL LOGIC (Replaces index.js)
+// ==========================================
+let authToken = null;
+let activeRegion = null;
+let wsClient = null;
+const sessionFilePath = path.join(os.homedir(), '.nexus_session.json');
+
+// This function replaces your fork('index.js') call. It runs in the main memory!
+function initializeEdgeNode(token, region) {
+    console.log(chalk.cyan(`\n[EDGE-NODE] Initializing worker in main process...`));
+    
+    if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+        wsClient.close();
+    }
+
+    wsClient = new WebSocket('wss://api.yourcontrolplane.com/tunnel', {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+
+    wsClient.on('open', () => console.log(chalk.green('[WS] Tunnel Connected')));
+    wsClient.on('close', () => console.log(chalk.yellow('[WS] Tunnel Closed')));
+}
+
+// ==========================================
+// 3. HIGH AVAILABILITY (HA) FAILOVER MODULE
 // ==========================================
 class HighAvailabilityWatcher {
   constructor(primaryIp, staticNgrokDomain, targetPort) {
     this.primaryIp = primaryIp;
     this.staticNgrokDomain = staticNgrokDomain;
     this.targetPort = targetPort;
-
     this.failCount = 0;
-    this.maxFails = 3; // 3 missed pings = Node Death
-    this.checkInterval = 5000; // Ping every 5 seconds
+    this.maxFails = 3;
+    this.checkInterval = 5000;
     this.hasTakenOver = false;
   }
 
   start() {
     console.log(chalk.cyan(`\n[HA-WATCHER] 🛡️ Active-Passive Failover Armed.`));
-    console.log(
-      chalk.gray(
-        `[HA-WATCHER] Monitoring Primary Node at ${this.primaryIp}...`,
-      ),
-    );
-
     setInterval(() => this.pingPrimary(), this.checkInterval);
   }
 
   async pingPrimary() {
     if (this.hasTakenOver) return;
-
     try {
-      // Ping the GUI status endpoint on the primary machine
-      await axios.get(`http://${this.primaryIp}:9000/api/status`, {
-        timeout: 3000,
-      });
+      await axios.get(`http://${this.primaryIp}:9000/api/status`, { timeout: 3000 });
       this.failCount = 0;
     } catch (error) {
       this.failCount++;
-      console.log(
-        chalk.yellow(
-          `[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`,
-        ),
-      );
-
-      if (this.failCount >= this.maxFails) {
-        this.triggerFailover();
-      }
+      console.log(chalk.yellow(`[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`));
+      if (this.failCount >= this.maxFails) this.triggerFailover();
     }
   }
 
   triggerFailover() {
     this.hasTakenOver = true;
-    console.log(
-      chalk.bgRed.white.bold(
-        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`,
-      ),
-    );
-
-    // Hijack the static Ngrok URL
-    const ngrokCommand = `ngrok http ${this.targetPort} --domain=${this.staticNgrokDomain}`;
-
-    exec(ngrokCommand, (error) => {
-      if (error) {
-        console.error(
-          chalk.red(
-            `[HA-WATCHER] Failed to hijack Ngrok tunnel: ${error.message}`,
-          ),
-        );
-        this.hasTakenOver = false;
-      }
+    console.log(chalk.bgRed.white.bold(`\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`));
+    
+    // Using shell: true to fix process path resolution issues
+    const ngrokProcess = spawn('ngrok', ['http', this.targetPort, `--domain=${this.staticNgrokDomain}`], {
+        shell: true, 
+        env: process.env
     });
 
-    console.log(
-      chalk.green(
-        `[HA-WATCHER] ✅ Secondary Node successfully took control of ${this.staticNgrokDomain}!`,
-      ),
-    );
+    ngrokProcess.on('error', (err) => {
+        console.error(chalk.red(`[HA-WATCHER] Failed to hijack Ngrok: ${err.message}`));
+        this.hasTakenOver = false;
+    });
   }
 }
 
 // ==========================================
-// 🚀 CORE EXPRESS ENGINE
+// 4. CORE EXPRESS ENGINE & FRONTEND
 // ==========================================
 const app = express();
 app.use(express.json());
 
-let authToken = null;
-let activeRegion = null;
-
-// Point this to your Render URL for production!
 let controlPlaneUrl = "https://nexuscloud-project-setu-v7.onrender.com";
-
-// --- API ROUTES FOR THE DESKTOP UI ---
 
 app.post("/api/register", async (req, res) => {
   try {
-    const response = await axios.post(
-      `${controlPlaneUrl}/api/v1/auth/register`,
-      {
-        email: req.body.email,
-        password: req.body.password,
-        region: req.body.region,
-      },
-    );
-
+    const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/register`, req.body);
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-
       console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
-
-      // 🔥 FIX: Use Electron's native fork to read inside the .asar archive
-      fork(path.join(__dirname, "index.js"), [authToken, activeRegion]);
-
+      
+      // FIX: Call function directly instead of fork()
+      initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
       res.status(400).json({ success: false, error: response.data.error });
     }
   } catch (err) {
-    res
-      .status(500)
-      .json({ success: false, error: "Control Plane unreachable." });
+    res.status(500).json({ success: false, error: "Control Plane unreachable." });
   }
 });
 
 app.post("/api/login", async (req, res) => {
   try {
-    const response = await axios.post(
-      `${controlPlaneUrl}/api/v1/auth/provider`,
-      {
-        email: req.body.email,
-        password: req.body.password,
-        region: req.body.region,
-      },
-    );
-
+    const response = await axios.post(`${controlPlaneUrl}/api/v1/auth/provider`, req.body);
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-
-      console.log(
-        chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
-      );
-
-      // 🔥 FIX: Use Electron's native fork to read inside the .asar archive
-      fork(path.join(__dirname, "index.js"), [authToken, activeRegion]);
-
+      console.log(chalk.green(`\n🔐 Authentication Successful! Token acquired.`));
+      
+      // FIX: Call function directly instead of fork()
+      initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
       res.status(401).json({ success: false, error: response.data.error });
     }
   } catch (err) {
-    res
-      .status(500)
-      .json({ success: false, error: "Control Plane unreachable." });
+    res.status(500).json({ success: false, error: "Control Plane unreachable." });
   }
 });
 
-// Telemetry/Status Route (Also used by HA-Watcher to check if node is alive)
 app.get("/api/status", (req, res) => {
   res.json({
     authenticated: authToken !== null,
@@ -174,7 +145,7 @@ app.get("/api/status", (req, res) => {
   });
 });
 
-// --- THE DESKTOP FRONTEND (Served from Memory) ---
+// YOUR ORIGINAL INLINE HTML FRONTEND
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -303,7 +274,7 @@ app.get("/", (req, res) => {
 });
 
 // ==========================================
-// 🪟 NATIVE ELECTRON APP LIFECYCLE
+// 5. NATIVE ELECTRON APP LIFECYCLE
 // ==========================================
 const GUI_PORT = 9000;
 let server;
@@ -321,7 +292,6 @@ function createWindow() {
     },
   });
 
-  // Load the local Express server into the native Electron window
   mainWindow.loadURL(`http://localhost:${GUI_PORT}`);
 
   mainWindow.on("closed", () => {
@@ -330,11 +300,9 @@ function createWindow() {
 }
 
 electronApp.whenReady().then(() => {
-  // 1. Start the Express server and save it to the 'server' variable
   server = app.listen(GUI_PORT, () => {
     console.log(chalk.bgBlue.white.bold(`\n 🖥️  Nexus Desktop UI Active `));
 
-    // 2. Check if user passed HA command line arguments
     const args = process.argv;
     const backupIndex = args.indexOf("--backup");
 
@@ -344,15 +312,13 @@ electronApp.whenReady().then(() => {
       const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
       watcher.start();
     } else {
-      console.log(
-        chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`),
-      );
+      console.log(chalk.gray(`   └─ Running as Primary Node (HA Watcher Disabled)`));
     }
 
     console.log(chalk.cyan(`   └─ Launching Native Desktop Interface...\n`));
-
-    // 3. Open the actual Window
     createWindow();
+  }).on('error', (err) => {
+      console.error(chalk.red(`Server failed to start on port ${GUI_PORT}. Is it already running?`), err.message);
   });
 
   electronApp.on("activate", () => {
@@ -360,16 +326,11 @@ electronApp.whenReady().then(() => {
   });
 });
 
-// 🛑 GRACEFUL SHUTDOWN: When all windows are closed, kill the port!
+// ==========================================
+// 6. FIX: GRACEFUL SHUTDOWN (NO MORE ZOMBIE PORTS)
+// ==========================================
 electronApp.on("window-all-closed", () => {
   console.log(chalk.yellow("Initiating shutdown sequence..."));
-
-  if (server) {
-    server.close(() => {
-      console.log(chalk.green("✅ Port 9000 released successfully."));
-    });
-  }
-
   if (process.platform !== "darwin") {
     electronApp.quit();
   }
@@ -377,6 +338,11 @@ electronApp.on("window-all-closed", () => {
 
 electronApp.on("before-quit", () => {
   if (server) {
-    server.close();
+    server.close(() => {
+        console.log(chalk.green("✅ Express Port 9000 released cleanly."));
+    });
+  }
+  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+      wsClient.close();
   }
 });
