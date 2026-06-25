@@ -49,7 +49,6 @@ class ConnectionManager:
     async def connect_client(self, websocket: WebSocket, deployment_id: str):
         await websocket.accept()
         self.clients[deployment_id] = websocket
-        print(f"DEBUG: ✅ WebSocket connection confirmed for {deployment_id}")
         
         # NEW: Flush any logs that arrived while the client was connecting
         if deployment_id in self.pending_logs:
@@ -72,7 +71,6 @@ class ConnectionManager:
             print(f"DEBUG: Client {deployment_id} not connected. Buffering log.")
 
 manager = ConnectionManager()
-
 # ==========================================
 # 📦 REQUEST MODELS
 # ==========================================
