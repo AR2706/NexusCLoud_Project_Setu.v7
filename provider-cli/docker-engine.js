@@ -1,17 +1,17 @@
 /**
  * NEXUS CLOUD V7 - DOCKER ENGINE ORCHESTRATOR
- * Provides cross-platform container management and tunneling
+ * Includes Pre-Flight Diagnostics & Binary Auto-Downloading
  */
 
 const Docker = require("dockerode");
 const simpleGit = require("simple-git");
-const { spawn } = require("child_process");
+const { spawn, exec } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const https = require("https");
 const chalk = require("chalk");
 
-// 1. Cross-Platform Docker Connection
 const isWin = process.platform === "win32";
 const docker = new Docker(
   isWin
@@ -22,17 +22,84 @@ const docker = new Docker(
 const activeTunnels = new Map();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 2. Cloudflare Tunnel Orchestrator
-function establishPublicTunnel(localPort) {
+// ==========================================
+// 🛠️ PRE-FLIGHT & AUTO-DOWNLOADER
+// ==========================================
+function checkCommandExists(command) {
+  return new Promise((resolve) => {
+    exec(`${command} --version`, { shell: true }, (err) => resolve(!err));
+  });
+}
+
+function downloadCloudflared(streamLog) {
   return new Promise((resolve, reject) => {
-    console.log(
-      chalk.gray(
-        `   ├─ Negotiating Zero-Trust HTTPS Tunnel with Cloudflare...`,
-      ),
+    const binName = isWin ? "cloudflared.exe" : "cloudflared";
+    const downloadPath = path.join(os.homedir(), binName);
+
+    // Check if we already downloaded it previously
+    if (fs.existsSync(downloadPath)) return resolve(downloadPath);
+
+    streamLog(
+      `[System] 📥 Cloudflared missing. Auto-downloading binary for ${os.platform()}...\n`,
     );
 
-    const cmd = isWin ? "cloudflared.exe" : "cloudflared";
-    // shell: true is enforced universally to ensure system PATH inheritance
+    const url = isWin
+      ? "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+      : "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64";
+
+    const file = fs.createWriteStream(downloadPath);
+    https
+      .get(url, (response) => {
+        response.pipe(file);
+        file.on("finish", () => {
+          file.close();
+          if (!isWin) fs.chmodSync(downloadPath, 0o755); // Make executable on Linux/Mac
+          streamLog(`[System] ✅ Download complete.\n`);
+          resolve(downloadPath);
+        });
+      })
+      .on("error", (err) => {
+        fs.unlink(downloadPath, () => {});
+        reject(new Error(`Download failed: ${err.message}`));
+      });
+  });
+}
+
+async function runPreFlightChecks(streamLog) {
+  streamLog(`[System] Running Edge Environment Diagnostics...\n`);
+
+  const hasGit = await checkCommandExists("git");
+  if (!hasGit)
+    throw new Error(
+      "CRITICAL: Git is not installed on this host machine. Please install Git.",
+    );
+
+  const hasDocker = await checkCommandExists("docker");
+  if (!hasDocker)
+    throw new Error("CRITICAL: Docker is not installed or not in PATH.");
+
+  try {
+    await docker.ping();
+    streamLog(`[System] Docker Engine is awake and responsive.\n`);
+  } catch (e) {
+    throw new Error(
+      "CRITICAL: Docker Desktop is installed but not running. Please start Docker.",
+    );
+  }
+}
+
+// ==========================================
+// 🌐 TUNNEL ORCHESTRATOR
+// ==========================================
+function establishPublicTunnel(localPort, cloudflaredPath) {
+  return new Promise((resolve, reject) => {
+    // Use the auto-downloaded path if it exists, otherwise assume global
+    const cmd = fs.existsSync(cloudflaredPath)
+      ? cloudflaredPath
+      : isWin
+        ? "cloudflared.exe"
+        : "cloudflared";
+
     const tunnelProcess = spawn(
       cmd,
       ["tunnel", "--url", `http://127.0.0.1:${localPort}`],
@@ -49,14 +116,6 @@ function establishPublicTunnel(localPort) {
       }
     });
 
-    tunnelProcess.on("error", (err) => {
-      console.log(
-        chalk.red(
-          `   ├─ Cloudflare Error: ${err.message}. Is cloudflared installed?`,
-        ),
-      );
-    });
-
     setTimeout(
       () => reject(new Error("Cloudflare tunnel handshake timed out.")),
       15000,
@@ -64,7 +123,9 @@ function establishPublicTunnel(localPort) {
   });
 }
 
-// 3. Main Workload Deployment Pipeline
+// ==========================================
+// 🚀 PIPELINE EXECUTION
+// ==========================================
 async function deployWorkload(
   githubUrl,
   limits,
@@ -82,41 +143,37 @@ async function deployWorkload(
   };
 
   try {
-    // 🔥 THE FIX: 2.5 second buffer to allow Vercel Dashboard UI to connect its listener
-    await sleep(2500);
+    await sleep(1000); // Brief buffer for Vercel UI to connect
+    streamLog(`[System] Upstream multiplexer connection established.\n`);
 
-    console.log(
-      chalk.cyan(`\n🐳 [Docker Engine] Pipeline start: ${deploymentId}...`),
-    );
+    // 1. Run Diagnostics & Auto-Download
+    await runPreFlightChecks(streamLog);
+    const cloudflaredPath = await downloadCloudflared(streamLog);
+
+    // 2. Clone Code
     streamLog(
-      `Initiating pipeline for ${deploymentId}...\nCloning repository: ${githubUrl}\n`,
+      `\nInitiating pipeline for ${deploymentId}...\nCloning repository: ${githubUrl}\n`,
     );
-
     await simpleGit().clone(githubUrl, cloneDir);
-
-    if (!fs.existsSync(path.join(cloneDir, "Dockerfile"))) {
+    if (!fs.existsSync(path.join(cloneDir, "Dockerfile")))
       throw new Error("No Dockerfile detected in repository.");
-    }
 
+    // 3. Build Image
     streamLog(`Compiling Docker image natively...\n`);
     await new Promise((resolve, reject) => {
-      // 🔥 THE FIX: shell: true forces Electron to inherit system PATH for Docker
       const buildProcess = spawn("docker", ["build", "-t", deploymentId, "."], {
         cwd: cloneDir,
         env: { ...process.env, DOCKER_BUILDKIT: "1" },
         shell: true,
       });
-
       buildProcess.stdout.on("data", streamLog);
       buildProcess.stderr.on("data", streamLog);
       buildProcess.on("close", (code) =>
         code === 0 ? resolve() : reject(new Error(`Docker build failed.`)),
       );
-      buildProcess.on("error", () =>
-        reject(new Error("Docker engine not responding.")),
-      );
     });
 
+    // 4. Provision Container
     streamLog(
       `Provisioning sandbox: ${limits.maxCpu} vCPU, ${limits.maxRamMb}MB RAM\n`,
     );
@@ -134,12 +191,11 @@ async function deployWorkload(
     });
     await container.start();
 
+    // 5. Expose Tunnel
     streamLog(`Waiting for container services (3s)...\n`);
     await sleep(3000);
-
     streamLog(`Negotiating secure HTTPS tunnel...\n`);
-    const tunnel = await establishPublicTunnel(hostPort);
-
+    const tunnel = await establishPublicTunnel(hostPort, cloudflaredPath);
     activeTunnels.set(deploymentId, tunnel.processId);
 
     streamLog(`\n✅ WORKLOAD LIVE!\nPUBLIC URL: ${tunnel.publicUrl}\n`);
@@ -153,13 +209,10 @@ async function deployWorkload(
   }
 }
 
-// 4. Cleanup Sequence
 async function teardownWorkload(containerId, onLog) {
   const streamLog = (msg) => {
     if (onLog) onLog(msg.toString());
   };
-  console.log(chalk.yellow(`\n🗑️ [Docker Engine] Teardown: ${containerId}...`));
-
   try {
     const container = docker.getContainer(containerId);
     streamLog(`Stopping sandbox...\n`);
@@ -175,11 +228,9 @@ async function teardownWorkload(containerId, onLog) {
       } catch (e) {}
       activeTunnels.delete(containerId);
     }
-
     streamLog(`✅ Workload Eradicated.\n`);
     return { success: true };
   } catch (error) {
-    streamLog(`❌ Teardown Failure: ${error.message}\n`);
     return { success: false };
   }
 }
