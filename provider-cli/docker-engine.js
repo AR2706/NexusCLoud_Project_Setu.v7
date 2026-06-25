@@ -126,6 +126,10 @@ function establishPublicTunnel(localPort, cloudflaredPath) {
 // ==========================================
 // 🚀 PIPELINE EXECUTION
 // ==========================================
+
+// ==========================================
+// 🚀 DEPLOYMENT PIPELINE
+// ==========================================
 async function deployWorkload(
   githubUrl,
   limits,
@@ -143,10 +147,10 @@ async function deployWorkload(
   };
 
   try {
-    await sleep(1000); // Brief buffer for Vercel UI to connect
+    await sleep(1000); // Buffer for WebSocket connection
     streamLog(`[System] Upstream multiplexer connection established.\n`);
 
-    // 1. Run Diagnostics & Auto-Download
+    // 1. Diagnostics & Auto-Download
     await runPreFlightChecks(streamLog);
     const cloudflaredPath = await downloadCloudflared(streamLog);
 
@@ -161,15 +165,19 @@ async function deployWorkload(
     // 3. Build Image
     streamLog(`Compiling Docker image natively...\n`);
     await new Promise((resolve, reject) => {
+      // Force shell: true ensures Windows can find the 'docker' command
       const buildProcess = spawn("docker", ["build", "-t", deploymentId, "."], {
         cwd: cloneDir,
         env: { ...process.env, DOCKER_BUILDKIT: "1" },
-        shell: true,
+        shell: isWin,
       });
       buildProcess.stdout.on("data", streamLog);
       buildProcess.stderr.on("data", streamLog);
       buildProcess.on("close", (code) =>
         code === 0 ? resolve() : reject(new Error(`Docker build failed.`)),
+      );
+      buildProcess.on("error", () =>
+        reject(new Error("Docker engine not responding.")),
       );
     });
 
@@ -202,6 +210,7 @@ async function deployWorkload(
     fs.rmSync(cloneDir, { recursive: true, force: true });
     return { success: true };
   } catch (error) {
+    console.error(chalk.red(`[DEPLOYMENT ERROR] ${error.stack}`));
     streamLog(`\n❌ Pipeline Failure: ${error.message}\n`);
     if (fs.existsSync(cloneDir))
       fs.rmSync(cloneDir, { recursive: true, force: true });
