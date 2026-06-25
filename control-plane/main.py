@@ -113,7 +113,7 @@ async def deploy_workload(req: DeployRequest):
                 "containerId": deployment_id,
                 "targetPort": req.targetPort
             })
-            return {"success": True, "deploymentId": deployment_id}
+            return {"success": True, "container_id": deployment_id}
         except Exception as e:
             print(f"Failed to transmit to Edge Node: {e}")
             raise HTTPException(status_code=500, detail="Edge Node connection dropped.")
@@ -176,6 +176,7 @@ async def provider_ws(websocket: WebSocket, token: str, region: str):
 # Endpoint for Vercel Dashboard UI
 @app.websocket("/ws/client/{deployment_id}")
 async def client_ws(websocket: WebSocket, deployment_id: str):
+    print(f"DEBUG: Client connecting with ID: {deployment_id}")
     await manager.connect_client(websocket, deployment_id)
     try:
         while True:
