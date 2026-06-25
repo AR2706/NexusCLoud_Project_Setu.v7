@@ -36,14 +36,23 @@ function initializeEdgeNode(token, region) {
     wsClient.close();
   }
 
-  wsClient = new WebSocket("wss://api.yourcontrolplane.com/tunnel", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  // Send all standard browser headers to bypass Render's security filters
+  wsClient = new WebSocket(
+    "wss://nexuscloud-project-setu-v7.onrender.com/tunnel",
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Origin: "https://nexuscloud-project-setu-v7.onrender.com",
+        "User-Agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    },
+  );
 
   wsClient.on("open", () => {
     console.log(chalk.green("[WS] Tunnel Connected to Control Plane"));
 
-    // Announce capacity to the central brain so it becomes available on the dashboard
+    // Announce capacity to the central brain so it appears on the dashboard
     const capacityPayload = {
       action: "register_capacity",
       region: activeRegion,
@@ -53,7 +62,15 @@ function initializeEdgeNode(token, region) {
 
     wsClient.send(JSON.stringify(capacityPayload));
   });
-  wsClient.on("close", () => console.log(chalk.yellow("[WS] Tunnel Closed")));
+
+  wsClient.on("close", (code, reason) =>
+    console.log(
+      chalk.yellow(`[WS] Tunnel Closed. Code: ${code}, Reason: ${reason}`),
+    ),
+  );
+  wsClient.on("error", (err) =>
+    console.error(chalk.red(`[WS] CRITICAL ERROR:`), err.message),
+  );
 }
 
 // ==========================================
@@ -101,7 +118,7 @@ class HighAvailabilityWatcher {
       ),
     );
 
-    // Using shell: true to fix process path resolution issues
+    // Using shell: true to fix process path resolution issues in .asar
     const ngrokProcess = spawn(
       "ngrok",
       ["http", this.targetPort, `--domain=${this.staticNgrokDomain}`],
@@ -139,7 +156,7 @@ app.post("/api/register", async (req, res) => {
       activeRegion = req.body.region || "global";
       console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
 
-      // FIX: Call function directly instead of fork()
+      // Call function directly instead of fork()
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
@@ -165,7 +182,7 @@ app.post("/api/login", async (req, res) => {
         chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
       );
 
-      // FIX: Call function directly instead of fork()
+      // Call function directly instead of fork()
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
@@ -188,7 +205,7 @@ app.get("/api/status", (req, res) => {
   });
 });
 
-// YOUR ORIGINAL INLINE HTML FRONTEND
+// DESKTOP UI INJECTED VIA EXPRESS
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
