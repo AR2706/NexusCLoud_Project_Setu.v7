@@ -79,14 +79,10 @@ async function runPreFlightChecks(streamLog) {
 // ==========================================
 function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
   return new Promise((resolve, reject) => {
-    // Wrap path in quotes to handle spaces in usernames/directories
+    // Force absolute path for the binary
     const cmd = fs.existsSync(cloudflaredPath)
       ? `"${cloudflaredPath}"`
-      : isWin
-        ? "cloudflared.exe"
-        : "cloudflared";
-
-    // CRITICAL FIX: Added --no-autoupdate to prevent background hangs
+      : "cloudflared";
     const args = [
       "tunnel",
       "--no-autoupdate",
@@ -94,19 +90,24 @@ function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
       `http://127.0.0.1:${localPort}`,
     ];
 
-    streamLog(
-      `\n[System] Launching Cloudflare Tunnel on Port ${localPort}...\n`,
-    );
+    streamLog(`\n[System] Launching Cloudflare Tunnel (Cmd: ${cmd})...\n`);
 
-    const tunnelProcess = spawn(`${cmd} ${args.join(" ")}`, { shell: true });
+    const tunnelProcess = spawn(cmd, args, { shell: true });
 
     let found = false;
 
+    // NEW: Catch if the process dies instantly
+    tunnelProcess.on("close", (code) => {
+      if (code !== 0 && !found) {
+        streamLog(
+          `[Tunnel Error] Process exited with code ${code}. Check if cloudflared is installed/executable.\n`,
+        );
+      }
+    });
+
     const parseOutput = (data) => {
       const output = data.toString();
-      // Stream Cloudflare's internal thought process to the UI
       streamLog(`[Cloudflare] ${output}`);
-
       const urlMatch = output.match(
         /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/,
       );
@@ -126,7 +127,7 @@ function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
     setTimeout(() => {
       if (!found) {
         tunnelProcess.kill();
-        reject(new Error("Cloudflare timeout. See logs above for reason."));
+        reject(new Error("Cloudflare timeout."));
       }
     }, 30000);
   });
