@@ -1058,7 +1058,9 @@ function Dashboard({ token }) {
       const data = await response.json();
 
       if (!response.ok || !data.success)
-        throw new Error(data.error || "Deployment pipeline rejected.");
+        throw new Error(
+          data.error || "Deployment pipeline rejected parameters.",
+        );
 
       // 🔥 CRITICAL: Delay the WebSocket connect to give the Backend time to init
       setTimeout(() => {
@@ -1074,20 +1076,33 @@ function Dashboard({ token }) {
         };
 
         ws.onmessage = (event) => {
-          setLiveLogs((prev) => [...prev, event.data]);
-          if (event.data.includes("https://")) {
-            const urlMatch = event.data.match(
-              /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com|https:\/\/[a-zA-Z0-9-]+\.loca\.lt/,
+          // SAFE PARSING: Handle both JSON and Plain Text
+          let logContent = event.data;
+
+          try {
+            const parsed = JSON.parse(event.data);
+            if (parsed.log) logContent = parsed.log;
+          } catch (e) {
+            // It's plain text, keep logContent as is
+          }
+
+          setLiveLogs((prev) => [...prev, logContent]);
+
+          // URL Extraction
+          const linkHarvest = logContent.match(
+            /https:\/\/[a-zA-Z0-9-]+\.loca\.lt|https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/,
+          );
+
+          if (linkHarvest) {
+            const liveUrl = linkHarvest[0];
+            setActiveDeployments((prev) =>
+              prev.map((dep) =>
+                dep.id === data.container_id ? { ...dep, url: liveUrl } : dep,
+              ),
             );
-            if (urlMatch) {
-              setActiveDeployments((prev) =>
-                prev.map((dep) =>
-                  dep.id === data.container_id
-                    ? { ...dep, url: urlMatch[0] }
-                    : dep,
-                ),
-              );
-            }
+
+            // 🔥 THE FIX: Unlock the UI once the URL is found!
+            setIsDeploying(false);
           }
         };
 
@@ -1105,8 +1120,10 @@ function Dashboard({ token }) {
         {
           id: data.container_id,
           repo: repoUrl,
-          region: selectedRegion,
+          region: regions.find((r) => r.id === selectedRegion),
           url: null,
+          port: targetPort,
+          isTerminating: false,
         },
       ]);
     } catch (err) {

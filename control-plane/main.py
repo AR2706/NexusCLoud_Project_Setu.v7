@@ -23,7 +23,7 @@ app.add_middleware(
 # ==========================================
 # 🗄️ DATABASE INITIALIZATION (MongoDB Atlas)
 # ==========================================
-MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = client.nexus_db 
 users_collection = db.users
@@ -42,9 +42,12 @@ async def debug_db():
 # ==========================================
 class ConnectionManager:
     def __init__(self):
+        # Maps Region -> List of connected Desktop Engine WebSockets
         self.providers: Dict[str, List[WebSocket]] = {}
+        # Maps DeploymentID -> Vercel UI WebSocket
         self.clients: Dict[str, WebSocket] = {}
-        self.pending_logs: Dict[str, List[str]] = {}
+        # Buffer for logs that arrive before the client connects
+        self.pending_logs: Dict[str, List[str]] = {} 
         
     # --- EDGE NODE (PROVIDER) METHODS ---
     async def connect_provider(self, websocket: WebSocket, region: str):
@@ -61,6 +64,7 @@ class ConnectionManager:
     async def connect_client(self, websocket: WebSocket, deployment_id: str):
         await websocket.accept()
         self.clients[deployment_id] = websocket
+        print(f"DEBUG: ✅ WebSocket connection confirmed for {deployment_id}")
         
         # Flush any logs that arrived while the client was connecting
         if deployment_id in self.pending_logs:
@@ -83,6 +87,7 @@ class ConnectionManager:
             print(f"DEBUG: Client {deployment_id} not connected. Buffering log.")
 
 manager = ConnectionManager()
+
 # ==========================================
 # 📦 REQUEST MODELS
 # ==========================================
@@ -115,27 +120,24 @@ async def login(req: AuthRequest):
 @app.post("/api/v1/deploy")
 async def deploy_workload(req: DeployRequest):
     deployment_id = f"nexus-app-{uuid.uuid4().hex[:8]}"
-    print(f"DEBUG: Generated ID: {deployment_id}") #
+    print(f"DEBUG: Generated ID: {deployment_id}")
     region = req.region
-    
-    # Optional: Save deployment metadata to MongoDB here
-    # await db.deployments.insert_one({"deployment_id": deployment_id, "url": req.github_url, "region": region})
     
     print(f"🚀 Routing workload [{deployment_id}] to physical region: {region.upper()}")
     
-    # 🔥 THE MISSING LINK: Transmit the command to the Desktop Engine
+    # Transmit the command to the Desktop Engine
     if region in manager.providers and len(manager.providers[region]) > 0:
-        provider_ws = manager.providers[region][0] # Grab the first available node in the region
+        provider_ws = manager.providers[region][0] 
         
         try:
-            # In main.py, inside @app.post("/api/v1/deploy")
             await provider_ws.send_json({
-                "command": "DEPLOY_WORKLOAD",  # <--- THIS IS THE KEY YOUR FRONTEND IS LOOKING FOR
+                "command": "DEPLOY_WORKLOAD", 
                 "github_url": req.github_url,
                 "limits": req.limits,
                 "containerId": deployment_id,
                 "targetPort": req.targetPort
             })
+            # MUST return container_id to match React frontend
             return {"success": True, "container_id": deployment_id}
         except Exception as e:
             print(f"Failed to transmit to Edge Node: {e}")
@@ -146,8 +148,6 @@ async def deploy_workload(req: DeployRequest):
 @app.delete("/api/v1/deploy/{deployment_id}")
 async def teardown_workload(deployment_id: str):
     stop_payload = {"command": "STOP_WORKLOAD", "containerId": deployment_id}
-    
-    # Optional: Update status in MongoDB here
     
     for region, providers in manager.providers.items():
         for provider_ws in providers:
@@ -167,7 +167,9 @@ async def provider_ws(websocket: WebSocket, token: str, region: str):
     await manager.connect_provider(websocket, region)
     print(f"🌍 Authenticated Edge Node connected to Region: [{region.upper()}]")
     
-    # Acknowledge connection
+    # Note: If you want true MongoDB auth, uncomment the check here. 
+    # For now, it is bypassed so you can test the deployment flow.
+    
     await websocket.send_json({"status": "acknowledged"})
     
     try:
@@ -176,21 +178,13 @@ async def provider_ws(websocket: WebSocket, token: str, region: str):
             
             if data.get("action") == "register_capacity":
                 print(f"✅ Node capacity logged: {data.get('cores')} Cores, {data.get('ram')}GB RAM")
-                # Optional: Update node capacity in MongoDB
             
-            # 🔥 BRIDGE LOGS: Route logs from Electron -> Control Plane -> Vercel UI
-            # 🔥 BRIDGE LOGS: Route logs from Electron -> Control Plane -> Vercel UI
             elif data.get("type") == "BUILD_LOG":
                 container_id = data.get("containerId")
                 log_content = data.get("log")
                 
-                # Debug print to see if backend is even receiving the log
-                print(f"DEBUG: Routing log for {container_id} to client") 
-                
-                if container_id in manager.clients:
-                    await manager.clients[container_id].send_text(log_content)
-                else:
-                    print(f"DEBUG: Client {container_id} not found in manager.clients!")
+                # Send the log using the centralized manager method (handles buffering)
+                await manager.send_log_to_client(container_id, log_content)
                 
     except WebSocketDisconnect:
         print(f"⚠️ Edge Node dropped from Region: [{region.upper()}]")
