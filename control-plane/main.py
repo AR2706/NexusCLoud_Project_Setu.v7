@@ -44,13 +44,25 @@ class ConnectionManager:
     def __init__(self):
         self.providers: Dict[str, List[WebSocket]] = {}
         self.clients: Dict[str, WebSocket] = {}
-        self.pending_logs: Dict[str, List[str]] = {} # NEW: Buffer logs
+        self.pending_logs: Dict[str, List[str]] = {}
         
+    # --- EDGE NODE (PROVIDER) METHODS ---
+    async def connect_provider(self, websocket: WebSocket, region: str):
+        await websocket.accept()
+        if region not in self.providers:
+            self.providers[region] = []
+        self.providers[region].append(websocket)
+        
+    def disconnect_provider(self, websocket: WebSocket, region: str):
+        if region in self.providers and websocket in self.providers[region]:
+            self.providers[region].remove(websocket)
+            
+    # --- DASHBOARD UI (CLIENT) METHODS ---
     async def connect_client(self, websocket: WebSocket, deployment_id: str):
         await websocket.accept()
         self.clients[deployment_id] = websocket
         
-        # NEW: Flush any logs that arrived while the client was connecting
+        # Flush any logs that arrived while the client was connecting
         if deployment_id in self.pending_logs:
             for log in self.pending_logs[deployment_id]:
                 await websocket.send_text(log)
@@ -64,7 +76,7 @@ class ConnectionManager:
         if deployment_id in self.clients:
             await self.clients[deployment_id].send_text(log)
         else:
-            # NEW: Buffer the log instead of dropping it
+            # Buffer the log instead of dropping it
             if deployment_id not in self.pending_logs:
                 self.pending_logs[deployment_id] = []
             self.pending_logs[deployment_id].append(log)
