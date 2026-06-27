@@ -30,8 +30,13 @@
       "output": "../dashboard/public"
     },
     "win": {
-      "target": "portable",
-      "artifactName": "gui-win.exe"
+      "target": "nsis",
+      "artifactName": "NexusEdge-Setup.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     },
     "linux": {
       "target": "AppImage",

@@ -238,7 +238,7 @@ function DownloadPage() {
             <h3 style={{ margin: 0, fontSize: "1.4rem" }}>Windows</h3>
           </div>
           <a
-            href="https://github.com/AR2706/NexusCLoud_Project_Setu.v7/releases/download/v1.0.0/gui-win.exe"
+            href="https://github.com/AR2706/NexusCLoud_Project_Setu.v7/releases/download/v1.0.0/NexusEdge-Setup.exe"
             className="btn btn-primary"
             style={{
               display: "flex",
@@ -252,7 +252,7 @@ function DownloadPage() {
               marginBottom: "2rem",
             }}
           >
-            <Download size={18} /> Download .exe
+            <Download size={18} /> Download Setup .exe
           </a>
           <div
             style={{
@@ -287,12 +287,12 @@ function DownloadPage() {
                 gap: "0.5rem",
               }}
             >
-              <li>Download the executable file.</li>
-              <li>Double-click to run. No installation required.</li>
+              <li>Download and run the Setup executable.</li>
               <li>
-                If Windows Defender SmartScreen appears, click{" "}
-                <strong>More info</strong> then <strong>Run anyway</strong>.
+                The installer will automatically detect and install Docker if
+                needed.
               </li>
+              <li>Launch Nexus Edge Engine from your Start Menu.</li>
             </ol>
           </div>
         </div>
@@ -1062,7 +1062,6 @@ function Dashboard({ token }) {
           data.error || "Deployment pipeline rejected parameters.",
         );
 
-      // 🔥 CRITICAL: Delay the WebSocket connect to give the Backend time to init
       setTimeout(() => {
         const wsUrl = `wss://nexuscloud-project-setu-v7.onrender.com/ws/client/${data.container_id}`;
         console.log(`[DEBUG] Attempting WS connection to: ${wsUrl}`);
@@ -1076,19 +1075,17 @@ function Dashboard({ token }) {
         };
 
         ws.onmessage = (event) => {
-          // SAFE PARSING: Handle both JSON and Plain Text
           let logContent = event.data;
 
           try {
             const parsed = JSON.parse(event.data);
             if (parsed.log) logContent = parsed.log;
           } catch (e) {
-            // It's plain text, keep logContent as is
+            // plain text
           }
 
           setLiveLogs((prev) => [...prev, logContent]);
 
-          // URL Extraction
           const linkHarvest = logContent.match(
             /https:\/\/[a-zA-Z0-9-]+\.loca\.lt|https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/,
           );
@@ -1101,7 +1098,6 @@ function Dashboard({ token }) {
               ),
             );
 
-            // 🔥 THE FIX: Unlock the UI once the URL is found!
             setIsDeploying(false);
           }
         };

@@ -8,7 +8,7 @@ const Docker = require("dockerode");
 const WebSocket = require("ws");
 const { spawn } = require("child_process");
 
-// Make sure getContainerStatus is imported!
+// Import from docker-engine
 const {
   deployWorkload,
   teardownWorkload,
@@ -30,7 +30,7 @@ const docker = new Docker({ socketPath: dockerSocket });
 let authToken = null;
 let activeRegion = null;
 let wsClient = null;
-let currentContainerId = null; // 🔥 FIX: Globally defined to prevent ReferenceError
+let currentContainerId = null; // Globablly tracks the active deployment
 const sessionFilePath = path.join(os.homedir(), ".nexus_session.json");
 
 function initializeEdgeNode(token, region) {
@@ -57,17 +57,19 @@ function initializeEdgeNode(token, region) {
 
     wsClient.send(JSON.stringify(capacityPayload));
 
-    // Health Monitor Loop
+    // Health Monitor Loop (Heartbeat)
     setInterval(async () => {
       if (currentContainerId) {
         const status = await getContainerStatus(currentContainerId);
-        wsClient.send(
-          JSON.stringify({
-            type: "STATUS_UPDATE",
-            containerId: currentContainerId,
-            status: status.status,
-          }),
-        );
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+          wsClient.send(
+            JSON.stringify({
+              type: "STATUS_UPDATE",
+              containerId: currentContainerId,
+              status: status.status,
+            }),
+          );
+        }
       }
     }, 10000);
   });
@@ -101,7 +103,7 @@ function initializeEdgeNode(token, region) {
           );
         }
 
-        // 2. 🔥 FIX: Send to Local Electron UI Terminal
+        // 2. Send to Local Electron UI Terminal
         if (mainWindow) {
           const safeHtml = logMsg
             .replace(/\\/g, "\\\\")
@@ -125,7 +127,7 @@ function initializeEdgeNode(token, region) {
       if (commandToRun === "DEPLOY_WORKLOAD") {
         console.log(chalk.yellow(`[System] Executing: ${msg.github_url}`));
 
-        currentContainerId = msg.containerId; // 🔥 FIX: Set the variable!
+        currentContainerId = msg.containerId; // Track for heartbeat
 
         const result = await deployWorkload(
           msg.github_url,
@@ -417,7 +419,7 @@ electronApp.whenReady().then(() => {
 });
 
 // ==========================================
-// 6. FIX: GRACEFUL SHUTDOWN
+// 6. GRACEFUL SHUTDOWN
 // ==========================================
 electronApp.on("window-all-closed", () => {
   console.log(chalk.yellow("Initiating shutdown sequence..."));

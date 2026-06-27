@@ -9,9 +9,11 @@ const { spawn, exec } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const https = require("https");
 const chalk = require("chalk");
 
+// ==========================================
+// 1. CROSS-PLATFORM DOCKER SETUP
+// ==========================================
 const isWin = process.platform === "win32";
 const docker = new Docker(
   isWin
@@ -23,19 +25,15 @@ const activeTunnels = new Map();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ==========================================
-// 🛠️ PRE-FLIGHT & AUTO-DOWNLOADER
+// 2. DIAGNOSTICS & STATUS
 // ==========================================
 function checkCommandExists(command) {
   return new Promise((resolve) => {
     exec(`${command} --version`, { shell: true }, (err) => resolve(!err));
   });
 }
-// This works on EVERY machine, regardless of username
-function getCloudflaredPath() {
-  const binName = isWin ? "cloudflared.exe" : "cloudflared";
-  return path.join(os.homedir(), binName);
-}
-// Add to docker-engine.js
+
+// Container Status for Health Monitoring
 async function getContainerStatus(containerId) {
   try {
     const container = docker.getContainer(containerId);
@@ -47,38 +45,6 @@ async function getContainerStatus(containerId) {
   } catch (e) {
     return { status: "unknown", running: false };
   }
-}
-
-function downloadCloudflared(streamLog) {
-  return new Promise((resolve, reject) => {
-    const downloadPath = getCloudflaredPath(); // Dynamic path based on user
-
-    if (fs.existsSync(downloadPath)) return resolve(downloadPath);
-
-    streamLog(
-      `[System] 📥 Cloudflared missing. Auto-downloading to ${downloadPath}...\n`,
-    );
-
-    const url = isWin
-      ? "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-      : "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64";
-
-    const file = fs.createWriteStream(downloadPath);
-    https
-      .get(url, (response) => {
-        response.pipe(file);
-        file.on("finish", () => {
-          file.close();
-          if (!isWin) fs.chmodSync(downloadPath, 0o755); // Essential for Linux
-          streamLog(`[System] ✅ Download complete.\n`);
-          resolve(downloadPath);
-        });
-      })
-      .on("error", (err) => {
-        fs.unlink(downloadPath, () => {});
-        reject(err);
-      });
-  });
 }
 
 async function runPreFlightChecks(streamLog) {
@@ -95,11 +61,11 @@ async function runPreFlightChecks(streamLog) {
 }
 
 // ==========================================
-// 🌐 TUNNEL ORCHESTRATOR
+// 3. TUNNEL ORCHESTRATOR
 // ==========================================
-function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
+function establishPublicTunnel(localPort, streamLog) {
   return new Promise((resolve, reject) => {
-    // We use the 'lt' command directly
+    // 🔥 FIX: Use 'npx lt' to bypass Linux global PATH issues
     const cmd = `npx lt --port ${localPort}`;
 
     streamLog(`\n[System] Launching Localtunnel on port ${localPort}...\n`);
@@ -127,18 +93,14 @@ function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
     setTimeout(() => {
       if (!found) {
         tunnelProcess.kill();
-        reject(
-          new Error(
-            "Tunnel timeout: Ensure localtunnel is installed (npm install -g localtunnel).",
-          ),
-        );
+        reject(new Error("Tunnel timeout: Ensure localtunnel is accessible."));
       }
     }, 20000);
   });
 }
 
 // ==========================================
-// 🚀 DEPLOYMENT PIPELINE
+// 4. DEPLOYMENT PIPELINE
 // ==========================================
 async function deployWorkload(
   githubUrl,
@@ -151,6 +113,7 @@ async function deployWorkload(
     console.log(chalk.gray(`[DEPLOY-LOG] ${msg}`));
     if (onLog) onLog(msg.toString());
   };
+
   const cloneDir = path.join(os.tmpdir(), containerId);
   const hostPort = Math.floor(Math.random() * (9000 - 3000 + 1)) + 3000;
   const containerPortString = `${targetPort}/tcp`;
@@ -160,7 +123,6 @@ async function deployWorkload(
     streamLog(`[System] Upstream multiplexer connection established.\n`);
 
     await runPreFlightChecks(streamLog);
-    const cloudflaredPath = await downloadCloudflared(streamLog);
 
     streamLog(`Cloning repository: ${githubUrl}\n`);
     await simpleGit().clone(githubUrl, cloneDir);
@@ -197,25 +159,27 @@ async function deployWorkload(
     await container.start();
 
     // Launch Tunnel & pass the log stream down
-    const tunnel = await establishPublicTunnel(
-      hostPort,
-      null, // Pass null instead of cloudflaredPath
-      streamLog,
-    );
+    const tunnel = await establishPublicTunnel(hostPort, streamLog);
     activeTunnels.set(containerId, tunnel.processId);
 
     streamLog(`\n✅ WORKLOAD LIVE!\nPUBLIC URL: ${tunnel.publicUrl}\n`);
+
+    // Cleanup the cloned source code to save disk space
     fs.rmSync(cloneDir, { recursive: true, force: true });
 
     return { success: true };
   } catch (error) {
     streamLog(`\n❌ Pipeline Failure: ${error.message}\n`);
-    if (fs.existsSync(cloneDir))
+    if (fs.existsSync(cloneDir)) {
       fs.rmSync(cloneDir, { recursive: true, force: true });
+    }
     return { success: false, error: error.message };
   }
 }
 
+// ==========================================
+// 5. TEARDOWN PIPELINE
+// ==========================================
 async function teardownWorkload(containerId, onLog) {
   const streamLog = (msg) => {
     if (onLog) onLog(msg.toString());
@@ -239,4 +203,5 @@ async function teardownWorkload(containerId, onLog) {
   }
 }
 
+// Ensure all functions are exported
 module.exports = { deployWorkload, teardownWorkload, getContainerStatus };
