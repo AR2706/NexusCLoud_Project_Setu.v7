@@ -100,7 +100,7 @@ async function runPreFlightChecks(streamLog) {
 function establishPublicTunnel(localPort, cloudflaredPath, streamLog) {
   return new Promise((resolve, reject) => {
     // We use the 'lt' command directly
-    const cmd = `lt --port ${localPort}`;
+    const cmd = `npx lt --port ${localPort}`;
 
     streamLog(`\n[System] Launching Localtunnel on port ${localPort}...\n`);
     const tunnelProcess = spawn(cmd, { shell: true });
