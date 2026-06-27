@@ -4,11 +4,16 @@ const axios = require("axios");
 const chalk = require("chalk");
 const os = require("os");
 const path = require("path");
-const fs = require("fs");
 const Docker = require("dockerode");
 const WebSocket = require("ws");
-const { exec, spawn } = require("child_process");
-const { deployWorkload, teardownWorkload } = require("./docker-engine");
+const { spawn } = require("child_process");
+
+// Make sure getContainerStatus is imported!
+const {
+  deployWorkload,
+  teardownWorkload,
+  getContainerStatus,
+} = require("./docker-engine");
 
 // ==========================================
 // 1. CROSS-PLATFORM DOCKER SETUP
@@ -25,6 +30,7 @@ const docker = new Docker({ socketPath: dockerSocket });
 let authToken = null;
 let activeRegion = null;
 let wsClient = null;
+let currentContainerId = null; // 🔥 FIX: Globally defined to prevent ReferenceError
 const sessionFilePath = path.join(os.homedir(), ".nexus_session.json");
 
 function initializeEdgeNode(token, region) {
@@ -36,7 +42,6 @@ function initializeEdgeNode(token, region) {
     wsClient.close();
   }
 
-  // 🔥 FIX: Corrected the URL to match the FastAPI backend route exactly
   const wsUrl = `wss://nexuscloud-project-setu-v7.onrender.com/ws/provider/${token}/${region}`;
   wsClient = new WebSocket(wsUrl);
 
@@ -51,42 +56,77 @@ function initializeEdgeNode(token, region) {
     };
 
     wsClient.send(JSON.stringify(capacityPayload));
+
+    // Health Monitor Loop
+    setInterval(async () => {
+      if (currentContainerId) {
+        const status = await getContainerStatus(currentContainerId);
+        wsClient.send(
+          JSON.stringify({
+            type: "STATUS_UPDATE",
+            containerId: currentContainerId,
+            status: status.status,
+          }),
+        );
+      }
+    }, 10000);
   });
 
   wsClient.on("message", async (data) => {
     try {
-      const msg = JSON.parse(data.toString());
-      console.log(
-        chalk.magenta(`[DEBUG] RAW PAYLOAD:`),
-        JSON.stringify(msg, null, 2),
-      );
+      const rawData = data.toString();
+      let msg;
 
-      // Capture the command from the backend
+      try {
+        msg = JSON.parse(rawData);
+      } catch (e) {
+        return; // Ignore non-JSON packets
+      }
+
       const commandToRun = msg.command || msg.action || msg.type;
-      console.log(chalk.blue(`[WS] Parsed Command: ${commandToRun}`));
 
-      // Define the stream function to pipe logs back to the server
-      // Inside gui.js, in the wsClient.on("message"...) block
+      // The Pipe Function: Sends logs to Vercel AND the Local Electron UI
       const stream = (l) => {
         const logMsg = l.toString();
-        console.log(chalk.gray(`[Stream] ${logMsg}`)); // Local terminal visibility
+        console.log(chalk.gray(`[Stream] ${logMsg.trim()}`));
 
-        if (wsClient.readyState === WebSocket.OPEN) {
+        // 1. Send to Control Plane (Vercel)
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
           wsClient.send(
             JSON.stringify({
               type: "BUILD_LOG",
-              containerId: msg.containerId,
+              containerId: msg.containerId || "unknown",
               log: logMsg,
             }),
           );
-        } else {
-          console.warn(chalk.red("[WS] Cannot send log, socket not open."));
+        }
+
+        // 2. 🔥 FIX: Send to Local Electron UI Terminal
+        if (mainWindow) {
+          const safeHtml = logMsg
+            .replace(/\\/g, "\\\\")
+            .replace(/`/g, "\\`")
+            .replace(/\n/g, "<br>");
+
+          mainWindow.webContents
+            .executeJavaScript(
+              `
+            var t = document.getElementById('local-terminal');
+            if (t) { 
+                t.innerHTML += "> " + \`${safeHtml}\`; 
+                t.scrollTop = t.scrollHeight; 
+            }
+          `,
+            )
+            .catch(() => {}); // Catch silent disposal errors during reload
         }
       };
 
-      // 🔥 THIS IS WHAT YOU WERE MISSING: Executing the function!
       if (commandToRun === "DEPLOY_WORKLOAD") {
         console.log(chalk.yellow(`[System] Executing: ${msg.github_url}`));
+
+        currentContainerId = msg.containerId; // 🔥 FIX: Set the variable!
+
         const result = await deployWorkload(
           msg.github_url,
           msg.limits,
@@ -94,12 +134,17 @@ function initializeEdgeNode(token, region) {
           msg.targetPort,
           stream,
         );
-        if (!result.success) stream(`\n❌ ERROR: ${result.error}\n`);
+
+        if (!result.success) {
+          stream(`\n❌ ERROR: ${result.error}\n`);
+        }
       } else if (commandToRun === "STOP_WORKLOAD") {
+        console.log(chalk.red(`[System] Terminating: ${msg.containerId}`));
         await teardownWorkload(msg.containerId, stream);
+        currentContainerId = null; // Clear tracking on stop
       }
     } catch (err) {
-      console.error(chalk.red("⚠️ Parse/Execution Error:"), err);
+      console.error(chalk.red("⚠️ Execution Error:"), err);
     }
   });
 
@@ -141,11 +186,6 @@ class HighAvailabilityWatcher {
       this.failCount = 0;
     } catch (error) {
       this.failCount++;
-      console.log(
-        chalk.yellow(
-          `[HA-WATCHER] ⚠️ Primary Node missed heartbeat (${this.failCount}/${this.maxFails})`,
-        ),
-      );
       if (this.failCount >= this.maxFails) this.triggerFailover();
     }
   }
@@ -154,23 +194,15 @@ class HighAvailabilityWatcher {
     this.hasTakenOver = true;
     console.log(
       chalk.bgRed.white.bold(
-        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING NGROK FAILOVER...`,
+        `\n[HA-WATCHER] 🚨 PRIMARY NODE OFFLINE! INITIATING FAILOVER...`,
       ),
     );
-
     const ngrokProcess = spawn(
       "ngrok",
       ["http", this.targetPort, `--domain=${this.staticNgrokDomain}`],
-      {
-        shell: true,
-        env: process.env,
-      },
+      { shell: true, env: process.env },
     );
-
-    ngrokProcess.on("error", (err) => {
-      console.error(
-        chalk.red(`[HA-WATCHER] Failed to hijack Ngrok: ${err.message}`),
-      );
+    ngrokProcess.on("error", () => {
       this.hasTakenOver = false;
     });
   }
@@ -193,8 +225,6 @@ app.post("/api/register", async (req, res) => {
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-      console.log(chalk.green(`\n✅ Account Created! Token acquired.`));
-
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
@@ -216,10 +246,6 @@ app.post("/api/login", async (req, res) => {
     if (response.data.success) {
       authToken = response.data.token;
       activeRegion = req.body.region || "global";
-      console.log(
-        chalk.green(`\n🔐 Authentication Successful! Token acquired.`),
-      );
-
       initializeEdgeNode(authToken, activeRegion);
       res.json({ success: true, region: activeRegion });
     } else {
@@ -266,12 +292,10 @@ app.get("/", (req, res) => {
 <button id="submit-btn" onclick="authenticate('login')" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition-colors mb-4">
 Connect to Grid
 </button>
-
 <div class="text-center text-sm">
 <span id="toggle-text" class="text-gray-400">Don't have an account?</span>
 <button onclick="toggleMode()" id="toggle-btn" class="text-blue-400 font-bold hover:underline ml-1">Register</button>
 </div>
-
 <p id="error-msg" class="text-red-400 text-sm mt-4 text-center hidden"></p>
 </div>
 
@@ -294,8 +318,7 @@ Connect to Grid
 <p class="text-xl font-mono" id="stat-ram">-- GB</p>
 </div>
 </div>
-
-<div class="bg-black p-4 rounded border border-gray-700 font-mono text-sm text-green-400 h-32 overflow-y-auto">
+<div id="local-terminal" class="bg-black p-4 rounded border border-gray-700 font-mono text-sm text-green-400 h-32 overflow-y-auto">
 > Initializing secure connection...<br>
 > Synchronizing regional ledger...<br>
 > Awaiting central brain instructions...<br>
@@ -304,62 +327,55 @@ Connect to Grid
 
 <script>
 let currentMode = 'login';
-
 function toggleMode() {
-currentMode = currentMode === 'login' ? 'register' : 'login';
-document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate your Edge Node' : 'Register your Edge Node';
-document.getElementById('submit-btn').textContent = currentMode === 'login' ? 'Connect to Grid' : 'Create Account';
-document.getElementById('submit-btn').setAttribute('onclick', \`authenticate('\${currentMode}')\`);
-document.getElementById('toggle-text').textContent = currentMode === 'login' ? "Don't have an account?" : "Already registered?";
-document.getElementById('toggle-btn').textContent = currentMode === 'login' ? "Register" : "Log In";
-document.getElementById('error-msg').classList.add('hidden');
+  currentMode = currentMode === 'login' ? 'register' : 'login';
+  document.getElementById('form-subtitle').textContent = currentMode === 'login' ? 'Authenticate your Edge Node' : 'Register your Edge Node';
+  document.getElementById('submit-btn').textContent = currentMode === 'login' ? 'Connect to Grid' : 'Create Account';
+  document.getElementById('submit-btn').setAttribute('onclick', \`authenticate('\${currentMode}')\`);
+  document.getElementById('toggle-text').textContent = currentMode === 'login' ? "Don't have an account?" : "Already registered?";
+  document.getElementById('toggle-btn').textContent = currentMode === 'login' ? "Register" : "Log In";
+  document.getElementById('error-msg').classList.add('hidden');
 }
-
 async function authenticate(mode) {
-const email = document.getElementById('email').value;
-const password = document.getElementById('password').value;
-const region = document.getElementById('region').value;
-const errorMsg = document.getElementById('error-msg');
-const btn = document.getElementById('submit-btn');
-btn.disabled = true;
-btn.textContent = 'Processing...';
-
-try {
-const endpoint = mode === 'register' ? '/api/register' : '/api/login';
-const res = await fetch(endpoint, {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ email, password, region })
-});
-const data = await res.json();
-if (data.success) {
-document.getElementById('login-view').classList.add('hidden');
-document.getElementById('dashboard-view').classList.remove('hidden');
-loadStats();
-} else {
-errorMsg.textContent = data.error;
-errorMsg.classList.remove('hidden');
+  const email = document.getElementById('email').value;
+  const password = document.getElementById('password').value;
+  const region = document.getElementById('region').value;
+  const errorMsg = document.getElementById('error-msg');
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Processing...';
+  try {
+    const res = await fetch(mode === 'register' ? '/api/register' : '/api/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, region })
+    });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById('login-view').classList.add('hidden');
+      document.getElementById('dashboard-view').classList.remove('hidden');
+      loadStats();
+    } else {
+      errorMsg.textContent = data.error;
+      errorMsg.classList.remove('hidden');
+    }
+  } catch(e) {
+    errorMsg.textContent = "Network Error.";
+    errorMsg.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = mode === 'login' ? 'Connect to Grid' : 'Create Account';
+  }
 }
-} catch(e) {
-errorMsg.textContent = "Network Error.";
-errorMsg.classList.remove('hidden');
-} finally {
-btn.disabled = false;
-btn.textContent = mode === 'login' ? 'Connect to Grid' : 'Create Account';
-}
-}
-
 async function loadStats() {
-const res = await fetch('/api/status');
-const data = await res.json();
-document.getElementById('stat-cores').textContent = data.cores;
-document.getElementById('stat-ram').textContent = data.ram + " GB";
-document.getElementById('stat-region').textContent = data.region.toUpperCase();
+  const res = await fetch('/api/status');
+  const data = await res.json();
+  document.getElementById('stat-cores').textContent = data.cores;
+  document.getElementById('stat-ram').textContent = data.ram + " GB";
+  document.getElementById('stat-region').textContent = data.region.toUpperCase();
 }
 </script>
 </body>
 </html>
-`);
+  `);
 });
 
 // ==========================================
@@ -380,9 +396,7 @@ function createWindow() {
       contextIsolation: false,
     },
   });
-
   mainWindow.loadURL(`http://localhost:${GUI_PORT}`);
-
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -392,59 +406,25 @@ electronApp.whenReady().then(() => {
   server = app
     .listen(GUI_PORT, () => {
       console.log(chalk.bgBlue.white.bold(`\n 🖥️ Nexus Desktop UI Active `));
-
-      const args = process.argv;
-      const backupIndex = args.indexOf("--backup");
-
-      if (
-        backupIndex !== -1 &&
-        args[backupIndex + 1] &&
-        args[backupIndex + 2]
-      ) {
-        const primaryIp = args[backupIndex + 1];
-        const ngrokDomain = args[backupIndex + 2];
-        const watcher = new HighAvailabilityWatcher(primaryIp, ngrokDomain, 80);
-        watcher.start();
-      } else {
-        console.log(
-          chalk.gray(` └─ Running as Primary Node (HA Watcher Disabled)`),
-        );
-      }
-
-      console.log(chalk.cyan(` └─ Launching Native Desktop Interface...\n`));
       createWindow();
     })
     .on("error", (err) => {
       console.error(
-        chalk.red(
-          `Server failed to start on port ${GUI_PORT}. Is it already running?`,
-        ),
+        chalk.red(`Server failed to start on port ${GUI_PORT}.`),
         err.message,
       );
     });
-
-  electronApp.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
 });
 
 // ==========================================
-// 6. FIX: GRACEFUL SHUTDOWN (NO MORE ZOMBIE PORTS)
+// 6. FIX: GRACEFUL SHUTDOWN
 // ==========================================
 electronApp.on("window-all-closed", () => {
   console.log(chalk.yellow("Initiating shutdown sequence..."));
-  if (process.platform !== "darwin") {
-    electronApp.quit();
-  }
+  if (process.platform !== "darwin") electronApp.quit();
 });
 
 electronApp.on("before-quit", () => {
-  if (server) {
-    server.close(() => {
-      console.log(chalk.green("✅ Express Port 9000 released cleanly."));
-    });
-  }
-  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-    wsClient.close();
-  }
+  if (server) server.close();
+  if (wsClient && wsClient.readyState === WebSocket.OPEN) wsClient.close();
 });

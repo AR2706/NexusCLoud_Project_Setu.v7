@@ -35,6 +35,19 @@ function getCloudflaredPath() {
   const binName = isWin ? "cloudflared.exe" : "cloudflared";
   return path.join(os.homedir(), binName);
 }
+// Add to docker-engine.js
+async function getContainerStatus(containerId) {
+  try {
+    const container = docker.getContainer(containerId);
+    const data = await container.inspect();
+    return {
+      status: data.State.Status, // e.g., "running", "exited"
+      running: data.State.Running,
+    };
+  } catch (e) {
+    return { status: "unknown", running: false };
+  }
+}
 
 function downloadCloudflared(streamLog) {
   return new Promise((resolve, reject) => {
@@ -186,7 +199,7 @@ async function deployWorkload(
     // Launch Tunnel & pass the log stream down
     const tunnel = await establishPublicTunnel(
       hostPort,
-      cloudflaredPath,
+      null, // Pass null instead of cloudflaredPath
       streamLog,
     );
     activeTunnels.set(containerId, tunnel.processId);
@@ -226,4 +239,4 @@ async function teardownWorkload(containerId, onLog) {
   }
 }
 
-module.exports = { deployWorkload, teardownWorkload };
+module.exports = { deployWorkload, teardownWorkload, getContainerStatus };
