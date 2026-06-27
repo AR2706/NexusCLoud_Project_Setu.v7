@@ -66,7 +66,7 @@ async function runPreFlightChecks(streamLog) {
 function establishPublicTunnel(localPort, streamLog) {
   return new Promise((resolve, reject) => {
     // 🔥 FIX: Use 'npx lt' to bypass Linux global PATH issues
-    const cmd = `npx lt --port ${localPort}`;
+    const cmd = `npx --yes lt --port ${localPort}`;
 
     streamLog(`\n[System] Launching Localtunnel on port ${localPort}...\n`);
     const tunnelProcess = spawn(cmd, { shell: true });
