@@ -12,4 +12,14 @@ provider-cli/node_modules/
 dashboard/node_modules/
 provider-cli/node_modules/
 dashboard/node_modules/
-dist/
+# Bulletproof Python Ignores
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/venv/
+**/env/
+**/.env
+
+# Bulletproof Node/Vite Ignores
+**/node_modules/
+**/dist/

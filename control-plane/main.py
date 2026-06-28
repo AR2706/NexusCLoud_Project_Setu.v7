@@ -6,6 +6,8 @@ import uuid
 import os
 from dotenv import load_dotenv
 from typing import Dict, List
+from datetime import datetime, timezone
+import asyncio
 
 # Load secure variables from the .env file
 load_dotenv()
@@ -27,6 +29,7 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = client.nexus_db 
 users_collection = db.users
+nodes_collection = db.edge_nodes  # Added for Heartbeat tracking
 
 # Add this test route to check if the DB is reachable
 @app.get("/debug/db")
@@ -102,6 +105,12 @@ class DeployRequest(BaseModel):
     region: str = "in-mum"
     limits: dict = {"maxCpu": 1, "maxRamMb": 512}
 
+class HeartbeatRequest(BaseModel):
+    token: str
+    region: str
+    container_id: str = None
+    status: str = "idle"
+
 # ==========================================
 # 🌐 REST API ROUTES
 # ==========================================
@@ -116,6 +125,21 @@ async def login(req: AuthRequest):
     # Add your MongoDB user verification logic here
     token = f"nxt_{uuid.uuid4().hex}"
     return {"success": True, "token": token}
+
+@app.post("/api/v1/heartbeat")
+async def node_heartbeat(req: HeartbeatRequest):
+    # Upsert the node status into MongoDB
+    await nodes_collection.update_one(
+        {"token": req.token},
+        {"$set": {
+            "region": req.region,
+            "current_workload": req.container_id,
+            "status": req.status,
+            "last_seen": datetime.now(timezone.utc)
+        }},
+        upsert=True
+    )
+    return {"success": True}
 
 @app.post("/api/v1/deploy")
 async def deploy_workload(req: DeployRequest):
@@ -204,3 +228,36 @@ async def client_ws(websocket: WebSocket, deployment_id: str):
 @app.get("/")
 def health_check():
     return {"status": "Nexus Control Plane Online", "version": "7.0.0"}
+
+# ==========================================
+# 🛡️ SYSTEM WATCHDOG (BACKGROUND TASK)
+# ==========================================
+async def watchdog_task():
+    while True:
+        try:
+            # Threshold: 60 seconds ago
+            threshold_time = datetime.now(timezone.utc).timestamp() - 60
+            
+            # This query finds nodes whose last_seen timestamp is older than 60s
+            # and marks their status as offline. 
+            # (In PyMongo, you can compare datetime objects directly if stored properly)
+            result = await nodes_collection.update_many(
+                {
+                    "status": {"$ne": "offline"},
+                    "last_seen": {"$lt": datetime.fromtimestamp(threshold_time, tz=timezone.utc)}
+                },
+                {"$set": {"status": "offline"}}
+            )
+            
+            if result.modified_count > 0:
+                print(f"[WATCHDOG] Swept {result.modified_count} stale nodes and marked them offline.")
+                
+            await asyncio.sleep(30) # Run the sweep every 30 seconds
+        except Exception as e:
+            print(f"[WATCHDOG] Error during sweep: {e}")
+            await asyncio.sleep(30)
+
+@app.on_event("startup")
+async def startup_event():
+    print("🚀 Initiating System Watchdog...")
+    asyncio.create_task(watchdog_task())

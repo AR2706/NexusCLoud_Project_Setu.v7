@@ -1203,6 +1203,24 @@ function Dashboard({ token }) {
               Secure orchestration token active
             </p>
           </div>
+          {/* THE DEEP LINK BRIDGE */}
+          <a
+            href={`nexusedge://connect?token=${USER_TOKEN}`}
+            className="btn btn-outline"
+            style={{
+              marginLeft: "20px",
+              borderColor: "#0070f3",
+              color: "#0070f3",
+              fontSize: "0.8rem",
+              padding: "6px 12px",
+              display: "flex",
+              alignItems: "center",
+              textDecoration: "none",
+            }}
+          >
+            <Activity size={14} style={{ marginRight: "6px" }} /> Wake Local
+            Node
+          </a>
         </div>
         <div
           style={{

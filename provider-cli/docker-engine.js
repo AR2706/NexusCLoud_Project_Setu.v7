@@ -3,7 +3,6 @@
  * Includes Pre-Flight Diagnostics, Auto-Downloading, and Live Log Streaming
  */
 
-const Docker = require("dockerode");
 const simpleGit = require("simple-git");
 const { spawn, exec } = require("child_process");
 const path = require("path");
@@ -11,15 +10,9 @@ const fs = require("fs");
 const os = require("os");
 const chalk = require("chalk");
 
-// ==========================================
-// 1. CROSS-PLATFORM DOCKER SETUP
-// ==========================================
-const isWin = process.platform === "win32";
-const docker = new Docker(
-  isWin
-    ? { socketPath: "//./pipe/docker_engine" }
-    : { socketPath: "/var/run/docker.sock" },
-);
+// 🔥 Replace hardcoded logic with our new Engine Manager
+const EngineManager = require("./engine-manager");
+const docker = EngineManager.getEngine();
 
 const activeTunnels = new Map();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,7 +58,6 @@ async function runPreFlightChecks(streamLog) {
 // ==========================================
 function establishPublicTunnel(localPort, streamLog) {
   return new Promise((resolve, reject) => {
-    // 🔥 FIX: Use 'npx lt' to bypass Linux global PATH issues
     const cmd = `npx --yes lt --port ${localPort}`;
 
     streamLog(`\n[System] Launching Localtunnel on port ${localPort}...\n`);
@@ -77,7 +69,6 @@ function establishPublicTunnel(localPort, streamLog) {
       const output = data.toString();
       streamLog(`[Tunnel]: ${output}`);
 
-      // Localtunnel prints the URL as: "your url is: https://..."
       const urlMatch = output.match(/https:\/\/[a-z0-9-]+\.loca\.lt/);
 
       if (urlMatch && !found) {
@@ -141,7 +132,6 @@ async function deployWorkload(
       );
     });
 
-    // Cleanup any zombie containers from previous failed runs
     try {
       await docker.getContainer(containerId).remove({ force: true });
     } catch (e) {}
@@ -158,13 +148,11 @@ async function deployWorkload(
     });
     await container.start();
 
-    // Launch Tunnel & pass the log stream down
     const tunnel = await establishPublicTunnel(hostPort, streamLog);
     activeTunnels.set(containerId, tunnel.processId);
 
     streamLog(`\n✅ WORKLOAD LIVE!\nPUBLIC URL: ${tunnel.publicUrl}\n`);
 
-    // Cleanup the cloned source code to save disk space
     fs.rmSync(cloneDir, { recursive: true, force: true });
 
     return { success: true };
@@ -203,5 +191,4 @@ async function teardownWorkload(containerId, onLog) {
   }
 }
 
-// Ensure all functions are exported
 module.exports = { deployWorkload, teardownWorkload, getContainerStatus };

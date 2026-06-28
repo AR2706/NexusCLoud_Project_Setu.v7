@@ -26,6 +26,12 @@
   "build": {
     "appId": "com.nexus.edge.engine",
     "productName": "NexusEdgeEngine",
+    "protocols": {
+      "name": "Nexus Edge Deep Link",
+      "schemes": [
+        "nexusedge"
+      ]
+    },
     "directories": {
       "output": "../dashboard/public"
     },
@@ -35,8 +41,7 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh"
+      "allowToChangeInstallationDirectory": true
     },
     "linux": {
       "target": "AppImage",
