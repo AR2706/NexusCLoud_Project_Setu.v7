@@ -111,8 +111,8 @@ nsis:
     !addincludedir "/home/admin123/Nexus-V7/provider-cli/build"
     !include "/home/admin123/Nexus-V7/provider-cli/build/installer.nsh"
     !addplugindir /x86-unicode "/home/admin123/.cache/electron-builder/nsis/nsis-resources-3.4.1/plugins/x86-unicode"
-    !include "/tmp/t-yZ44lM/0-messages.nsh"
-    !include "/tmp/t-yZ44lM/1-messages.nsh"
+    !include "/tmp/t-4UWDEG/0-messages.nsh"
+    !include "/tmp/t-4UWDEG/1-messages.nsh"
 
     Var newStartMenuLink
     Var oldStartMenuLink

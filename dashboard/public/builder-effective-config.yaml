@@ -3,13 +3,16 @@ directories:
   buildResources: build
 appId: com.nexus.edge.engine
 productName: NexusEdgeEngine
+protocols:
+  name: Nexus Edge Deep Link
+  schemes:
+    - nexusedge
 win:
   target: nsis
   artifactName: NexusEdge-Setup.exe
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  include: build/installer.nsh
 linux:
   target: AppImage
   artifactName: gui-linux

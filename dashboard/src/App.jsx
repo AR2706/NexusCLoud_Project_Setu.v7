@@ -1010,7 +1010,6 @@ function Dashboard({ token }) {
   const [liveLogs, setLiveLogs] = useState([]);
 
   const terminalEndRef = useRef(null);
-
   const USER_TOKEN = token;
 
   const regions = [
@@ -1035,6 +1034,32 @@ function Dashboard({ token }) {
     },
   ];
 
+  // Fetch deployments on load and poll every 10 seconds for offline status
+  useEffect(() => {
+    const fetchDeployments = async () => {
+      try {
+        const res = await fetch(`https://nexuscloud-project-setu-v7.onrender.com/api/v1/deployments/${USER_TOKEN}`);
+        const data = await res.json();
+        if (data.success) {
+          const mapped = data.deployments.map(d => ({
+            id: d.id,
+            repo: d.repo,
+            region: regions.find(r => r.id === d.region) || regions[0],
+            url: d.url,
+            port: d.port,
+            status: d.status, // Tracks 'active', 'provisioning', or 'offline'
+            isTerminating: false
+          }));
+          setActiveDeployments(mapped);
+        }
+      } catch (e) { console.error("History sync failed", e); }
+    };
+    
+    fetchDeployments();
+    const interval = setInterval(fetchDeployments, 10000);
+    return () => clearInterval(interval);
+  }, [USER_TOKEN]);
+
   const handleDeploy = async (e) => {
     e.preventDefault();
     setIsDeploying(true);
@@ -1049,6 +1074,7 @@ function Dashboard({ token }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            token: USER_TOKEN, // Ensure the backend knows who owns this!
             github_url: repoUrl,
             target_port: parseInt(targetPort),
             region: selectedRegion,
@@ -1092,9 +1118,17 @@ function Dashboard({ token }) {
 
           if (linkHarvest) {
             const liveUrl = linkHarvest[0];
+            
+            // Patch the Database with the generated URL
+            fetch(`https://nexuscloud-project-setu-v7.onrender.com/api/v1/deploy/${data.container_id}/url`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url: liveUrl })
+            });
+
             setActiveDeployments((prev) =>
               prev.map((dep) =>
-                dep.id === data.container_id ? { ...dep, url: liveUrl } : dep,
+                dep.id === data.container_id ? { ...dep, url: liveUrl, status: "active" } : dep,
               ),
             );
 
@@ -1119,6 +1153,7 @@ function Dashboard({ token }) {
           region: regions.find((r) => r.id === selectedRegion),
           url: null,
           port: targetPort,
+          status: "provisioning",
           isTerminating: false,
         },
       ]);
@@ -1204,18 +1239,18 @@ function Dashboard({ token }) {
             </p>
           </div>
           {/* THE DEEP LINK BRIDGE */}
-          <a
+          <a 
             href={`nexusedge://connect?token=${USER_TOKEN}`}
             className="btn btn-outline"
-            style={{
-              marginLeft: "20px",
-              borderColor: "#0070f3",
-              color: "#0070f3",
-              fontSize: "0.8rem",
+            style={{ 
+              marginLeft: "20px", 
+              borderColor: "#0070f3", 
+              color: "#0070f3", 
+              fontSize: "0.8rem", 
               padding: "6px 12px",
               display: "flex",
               alignItems: "center",
-              textDecoration: "none",
+              textDecoration: "none"
             }}
           >
             <Activity size={14} style={{ marginRight: "6px" }} /> Wake Local
@@ -1740,11 +1775,13 @@ function Dashboard({ token }) {
                         width: "8px",
                         height: "8px",
                         borderRadius: "50%",
-                        background: dep.url ? "#10b981" : "#f59e0b",
+                        background: dep.status === "offline" ? "#ef4444" : dep.url ? "#10b981" : "#f59e0b",
                       }}
                     ></span>
                     <strong style={{ color: "#fff", fontSize: "1rem" }}>
-                      {dep.url
+                      {dep.status === "offline" 
+                        ? "Node Unreachable"
+                        : dep.url
                         ? "Production Active"
                         : "Building Virtual Sandbox..."}
                     </strong>
@@ -1772,7 +1809,25 @@ function Dashboard({ token }) {
                     Instance ID: {dep.id}
                   </div>
 
-                  {dep.url ? (
+                  {dep.status === "offline" ? (
+                    <div
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        marginTop: "12px",
+                        color: "#ef4444",
+                        fontWeight: "700",
+                        padding: "6px 14px",
+                        background: "rgba(239, 68, 68, 0.1)",
+                        borderRadius: "8px",
+                        fontSize: "0.85rem",
+                        border: "1px solid rgba(239, 68, 68, 0.2)",
+                      }}
+                    >
+                      ⚠️ Node Offline (Link Dead)
+                    </div>
+                  ) : dep.url ? (
                     <a
                       href={dep.url}
                       target="_blank"

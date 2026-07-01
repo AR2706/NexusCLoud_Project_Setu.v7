@@ -29,9 +29,9 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = client.nexus_db 
 users_collection = db.users
-nodes_collection = db.edge_nodes  # Added for Heartbeat tracking
+nodes_collection = db.edge_nodes  
+deployments_collection = db.deployments 
 
-# Add this test route to check if the DB is reachable
 @app.get("/debug/db")
 async def debug_db():
     try:
@@ -45,14 +45,10 @@ async def debug_db():
 # ==========================================
 class ConnectionManager:
     def __init__(self):
-        # Maps Region -> List of connected Desktop Engine WebSockets
         self.providers: Dict[str, List[WebSocket]] = {}
-        # Maps DeploymentID -> Vercel UI WebSocket
         self.clients: Dict[str, WebSocket] = {}
-        # Buffer for logs that arrive before the client connects
         self.pending_logs: Dict[str, List[str]] = {} 
         
-    # --- EDGE NODE (PROVIDER) METHODS ---
     async def connect_provider(self, websocket: WebSocket, region: str):
         await websocket.accept()
         if region not in self.providers:
@@ -63,13 +59,11 @@ class ConnectionManager:
         if region in self.providers and websocket in self.providers[region]:
             self.providers[region].remove(websocket)
             
-    # --- DASHBOARD UI (CLIENT) METHODS ---
     async def connect_client(self, websocket: WebSocket, deployment_id: str):
         await websocket.accept()
         self.clients[deployment_id] = websocket
         print(f"DEBUG: ✅ WebSocket connection confirmed for {deployment_id}")
         
-        # Flush any logs that arrived while the client was connecting
         if deployment_id in self.pending_logs:
             for log in self.pending_logs[deployment_id]:
                 await websocket.send_text(log)
@@ -83,7 +77,6 @@ class ConnectionManager:
         if deployment_id in self.clients:
             await self.clients[deployment_id].send_text(log)
         else:
-            # Buffer the log instead of dropping it
             if deployment_id not in self.pending_logs:
                 self.pending_logs[deployment_id] = []
             self.pending_logs[deployment_id].append(log)
@@ -100,8 +93,9 @@ class AuthRequest(BaseModel):
     region: str = "global"
 
 class DeployRequest(BaseModel):
+    token: str           
     github_url: str
-    targetPort: int = 80
+    target_port: int = 80
     region: str = "in-mum"
     limits: dict = {"maxCpu": 1, "maxRamMb": 512}
 
@@ -111,63 +105,86 @@ class HeartbeatRequest(BaseModel):
     container_id: str = None
     status: str = "idle"
 
+class UpdateUrlRequest(BaseModel):
+    url: str
+
 # ==========================================
-# 🌐 REST API ROUTES
+# 🌐 REST API ROUTES 
 # ==========================================
 @app.post("/api/v1/auth/register")
 async def register(req: AuthRequest):
-    # Add your MongoDB user creation logic here
     token = f"nxt_{uuid.uuid4().hex}"
     return {"success": True, "token": token}
 
 @app.post("/api/v1/auth/provider")
 async def login(req: AuthRequest):
-    # Add your MongoDB user verification logic here
     token = f"nxt_{uuid.uuid4().hex}"
     return {"success": True, "token": token}
-
-@app.post("/api/v1/heartbeat")
-async def node_heartbeat(req: HeartbeatRequest):
-    # Upsert the node status into MongoDB
-    await nodes_collection.update_one(
-        {"token": req.token},
-        {"$set": {
-            "region": req.region,
-            "current_workload": req.container_id,
-            "status": req.status,
-            "last_seen": datetime.now(timezone.utc)
-        }},
-        upsert=True
-    )
-    return {"success": True}
 
 @app.post("/api/v1/deploy")
 async def deploy_workload(req: DeployRequest):
     deployment_id = f"nexus-app-{uuid.uuid4().hex[:8]}"
-    print(f"DEBUG: Generated ID: {deployment_id}")
     region = req.region
     
+    # Save the new deployment to MongoDB immediately
+    await deployments_collection.insert_one({
+        "id": deployment_id,
+        "token": req.token,
+        "repo": req.github_url,
+        "port": req.target_port,
+        "region": region,
+        "status": "provisioning",
+        "url": None,
+        "last_seen": datetime.now(timezone.utc)
+    })
+
     print(f"🚀 Routing workload [{deployment_id}] to physical region: {region.upper()}")
     
-    # Transmit the command to the Desktop Engine
     if region in manager.providers and len(manager.providers[region]) > 0:
         provider_ws = manager.providers[region][0] 
-        
         try:
             await provider_ws.send_json({
                 "command": "DEPLOY_WORKLOAD", 
                 "github_url": req.github_url,
                 "limits": req.limits,
                 "containerId": deployment_id,
-                "targetPort": req.targetPort
+                "targetPort": req.target_port
             })
-            # MUST return container_id to match React frontend
             return {"success": True, "container_id": deployment_id}
         except Exception as e:
             print(f"Failed to transmit to Edge Node: {e}")
             raise HTTPException(status_code=500, detail="Edge Node connection dropped.")
     else:
-        raise HTTPException(status_code=503, detail=f"No active Edge Nodes in region {region.upper()}")
+        raise HTTPException(status_code=503, detail=f"No active Nodes in {region.upper()}")
+
+@app.patch("/api/v1/deploy/{deployment_id}/url")
+async def update_deployment_url(deployment_id: str, req: UpdateUrlRequest):
+    await deployments_collection.update_one(
+        {"id": deployment_id},
+        {"$set": {"url": req.url, "status": "active"}}
+    )
+    return {"success": True}
+
+@app.get("/api/v1/deployments/{token}")
+async def get_deployments(token: str):
+    cursor = deployments_collection.find({"token": token}, {"_id": 0})
+    deployments = await cursor.to_list(length=100)
+    return {"success": True, "deployments": deployments}
+
+@app.post("/api/v1/heartbeat")
+async def node_heartbeat(req: HeartbeatRequest):
+    timestamp = datetime.now(timezone.utc)
+    await nodes_collection.update_one(
+        {"token": req.token},
+        {"$set": {"region": req.region, "status": req.status, "last_seen": timestamp}},
+        upsert=True
+    )
+    if req.container_id:
+        await deployments_collection.update_one(
+            {"id": req.container_id},
+            {"$set": {"status": req.status, "last_seen": timestamp}}
+        )
+    return {"success": True}
 
 @app.delete("/api/v1/deploy/{deployment_id}")
 async def teardown_workload(deployment_id: str):
@@ -182,46 +199,36 @@ async def teardown_workload(deployment_id: str):
     return {"success": True}
 
 # ==========================================
-# ⚡ WEBSOCKET ROUTES (THE REAL-TIME BRIDGE)
+# ⚡ WEBSOCKET ROUTES 
 # ==========================================
-
-# Endpoint for Desktop Engine (Electron)
 @app.websocket("/ws/provider/{token}/{region}")
 async def provider_ws(websocket: WebSocket, token: str, region: str):
     await manager.connect_provider(websocket, region)
     print(f"🌍 Authenticated Edge Node connected to Region: [{region.upper()}]")
-    
-    # Note: If you want true MongoDB auth, uncomment the check here. 
-    # For now, it is bypassed so you can test the deployment flow.
     
     await websocket.send_json({"status": "acknowledged"})
     
     try:
         while True:
             data = await websocket.receive_json()
-            
             if data.get("action") == "register_capacity":
                 print(f"✅ Node capacity logged: {data.get('cores')} Cores, {data.get('ram')}GB RAM")
-            
             elif data.get("type") == "BUILD_LOG":
                 container_id = data.get("containerId")
                 log_content = data.get("log")
-                
-                # Send the log using the centralized manager method (handles buffering)
                 await manager.send_log_to_client(container_id, log_content)
                 
     except WebSocketDisconnect:
         print(f"⚠️ Edge Node dropped from Region: [{region.upper()}]")
         manager.disconnect_provider(websocket, region)
 
-# Endpoint for Vercel Dashboard UI
 @app.websocket("/ws/client/{deployment_id}")
 async def client_ws(websocket: WebSocket, deployment_id: str):
     print(f"DEBUG: Client connecting with ID: {deployment_id}")
     await manager.connect_client(websocket, deployment_id)
     try:
         while True:
-            await websocket.receive_text() # Keep connection alive
+            await websocket.receive_text() 
     except WebSocketDisconnect:
         manager.disconnect_client(deployment_id)
 
@@ -235,13 +242,10 @@ def health_check():
 async def watchdog_task():
     while True:
         try:
-            # Threshold: 60 seconds ago
             threshold_time = datetime.now(timezone.utc).timestamp() - 60
             
-            # This query finds nodes whose last_seen timestamp is older than 60s
-            # and marks their status as offline. 
-            # (In PyMongo, you can compare datetime objects directly if stored properly)
-            result = await nodes_collection.update_many(
+            # Sweep Nodes
+            result_nodes = await nodes_collection.update_many(
                 {
                     "status": {"$ne": "offline"},
                     "last_seen": {"$lt": datetime.fromtimestamp(threshold_time, tz=timezone.utc)}
@@ -249,10 +253,19 @@ async def watchdog_task():
                 {"$set": {"status": "offline"}}
             )
             
-            if result.modified_count > 0:
-                print(f"[WATCHDOG] Swept {result.modified_count} stale nodes and marked them offline.")
+            # Sweep Deployments
+            result_deps = await deployments_collection.update_many(
+                {
+                    "status": {"$in": ["active", "provisioning"]},
+                    "last_seen": {"$lt": datetime.fromtimestamp(threshold_time, tz=timezone.utc)}
+                },
+                {"$set": {"status": "offline"}}
+            )
+            
+            if result_nodes.modified_count > 0 or result_deps.modified_count > 0:
+                print(f"[WATCHDOG] Swept {result_nodes.modified_count} stale nodes and {result_deps.modified_count} stale deployments.")
                 
-            await asyncio.sleep(30) # Run the sweep every 30 seconds
+            await asyncio.sleep(30) 
         except Exception as e:
             print(f"[WATCHDOG] Error during sweep: {e}")
             await asyncio.sleep(30)
